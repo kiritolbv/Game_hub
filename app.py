@@ -106,10 +106,11 @@ def leave_room():
 
 
 def back_to_lobby(code):
+    """Retour au menu principal (choix du jeu)."""
     with LOCK:
         room = ROOMS.get(code)
         if room:
-            room.update(status="lobby", bac=None, uno=None)
+            room.update(status="lobby", game=None, bac=None, uno=None)
             touch(room)
 
 
@@ -272,6 +273,30 @@ def bac_settings_ui(room, host):
         st.caption(f"{n} catégories sélectionnées.")
 
 
+def review_table(b, rows, me, opp, names):
+    """Tableau HTML des résultats (lisible aussi sur téléphone)."""
+
+    def cell(cat, ans, ok, pts, p):
+        a = html.escape(ans[p]) if ans[p].strip() else "—"
+        if ans[p].strip() and cat in b["rejects"][1 - p]:
+            return f"🚫 <s>{a}</s> <i>contesté</i> <b>+0</b>"
+        return f"{'✅' if ok[p] else '❌'} {a} <b>+{pts[p]}</b>"
+
+    out = [
+        "<table style='width:100%;border-collapse:collapse;font-size:15px'>",
+        f"<tr style='text-align:left;opacity:.7'><th style='padding:6px 4px'>Catégorie</th><th>Toi</th>"
+        f"<th>{html.escape(names[opp])}</th></tr>",
+    ]
+    for cat, ans, ok, pts in rows:
+        out.append(
+            f"<tr style='border-top:1px solid rgba(128,128,128,.3)'>"
+            f"<td style='padding:6px 4px;font-weight:600'>{html.escape(cat)}</td>"
+            f"<td>{cell(cat, ans, ok, pts, me)}</td><td>{cell(cat, ans, ok, pts, opp)}</td></tr>"
+        )
+    out.append("</table>")
+    return "".join(out)
+
+
 def bac_screen(room):
     b, s = room["bac"], room["bac_settings"]
     me, opp = ss.seat, 1 - ss.seat
@@ -314,28 +339,29 @@ def bac_screen(room):
         st.caption("Barème : 2 pts si ta réponse est différente de celle de l'autre, 1 pt si vous avez la même, 0 si vide ou mauvaise lettre.")
 
     elif b["phase"] == "review":
-        st.markdown(f"### Lettre **{b['letter']}** — vérification")
-        st.caption("Tu peux refuser une réponse de l'adversaire (case « Refuser ») si elle te semble fausse.")
+        st.markdown(f"### Lettre **{b['letter']}** — résultats")
         rows, tot = score_round(b, s)
-        h = st.columns([2, 3, 3])
-        h[0].markdown("**Catégorie**")
-        h[1].markdown(f"**{esc(names[me])} (toi)**")
-        h[2].markdown(f"**{esc(names[opp])}**")
-        for cat, ans, ok, pts in rows:
-            c = st.columns([2, 3, 3])
-            c[0].markdown(f"**{esc(cat)}**")
-            c[1].markdown(f"{'✅' if ok[me] else '❌'} {esc(ans[me]) or '—'} **(+{pts[me]})**")
-            c[2].markdown(f"{'✅' if ok[opp] else '❌'} {esc(ans[opp]) or '—'} **(+{pts[opp]})**")
-            if ans[opp].strip():
-                key = f"rej_{b['id']}_{b['round']}_{cat}"
-                c[2].checkbox(
-                    "Refuser",
-                    value=cat in b["rejects"][me],
-                    key=key,
-                    on_change=bac_toggle_reject,
-                    args=(room["code"], me, cat, key),
-                )
-        st.markdown(f"**Points de la manche :** toi {tot[me]} — {esc(names[opp])} {tot[opp]}")
+        lost = [c for c in s["cats"] if c in b["rejects"][opp] and b["answers"][me].get(c, "").strip()]
+        if lost:
+            st.warning(f"⚖️ {esc(names[opp])} a contesté : {esc(', '.join(lost))} (0 point pour ces réponses)")
+        st.markdown(review_table(b, rows, me, opp, names), unsafe_allow_html=True)
+        st.markdown(f"**Points de la manche :** toi {tot[me]} · {esc(names[opp])} {tot[opp]}")
+
+        opp_answers = [(c, b["answers"][opp].get(c, "")) for c in s["cats"] if b["answers"][opp].get(c, "").strip()]
+        if opp_answers:
+            with st.expander(f"⚖️ Contester les réponses de {names[opp]}"):
+                st.caption("Coche la ou les réponses que tu juges fausses : elles passent à 0 point.")
+                for cat, a in opp_answers:
+                    key = f"rej_{b['id']}_{b['round']}_{cat}"
+                    if key not in ss:
+                        ss[key] = cat in b["rejects"][me]
+                    st.checkbox(
+                        f"{esc(cat)} : {esc(a)}",
+                        key=key,
+                        on_change=bac_toggle_reject,
+                        args=(room["code"], me, cat, key),
+                    )
+
         last = b["round"] >= s["rounds"]
         if b["ready"][me]:
             st.info(f"En attente de {names[opp]}…")
@@ -361,20 +387,21 @@ def bac_screen(room):
         if host:
             c1, c2 = st.columns(2)
             c1.button("🔁 Rejouer", on_click=start_game, args=(room["code"],), type="primary", use_container_width=True)
-            c2.button("🏠 Retour au salon", on_click=back_to_lobby, args=(room["code"],), use_container_width=True)
+            c2.button("🏠 Menu principal", on_click=back_to_lobby, args=(room["code"],), use_container_width=True)
         else:
-            st.caption("L'hôte peut relancer une partie ou revenir au salon.")
+            st.caption("L'hôte peut relancer une partie ou revenir au menu.")
 
 
 # ════════════════════════════════════════════════════════════════
 #  UNO
 # ════════════════════════════════════════════════════════════════
 
-COLORS = {"R": "🟥", "Y": "🟨", "G": "🟩", "B": "🟦", "K": "⬛"}
-COLOR_NAMES = {"R": "Rouge", "Y": "Jaune", "G": "Vert", "B": "Bleu"}
+COLOR_NAMES = {"R": "Rouge", "Y": "Jaune", "G": "Vert", "B": "Bleu", "K": "Noir"}
 CSS_COLORS = {"R": "#d72600", "Y": "#e6c700", "G": "#2e8b17", "B": "#0063b3", "K": "#222222"}
-BIG = {"skip": "⛔", "reverse": "🔄", "+2": "+2", "+4": "+4", "wild": "🌈"}
-SMALL = {"skip": "⛔ Passe", "reverse": "🔄 Sens", "+2": "+2", "+4": "+4", "wild": "Joker"}
+GRAD = "linear-gradient(135deg,#d72600 25%,#e6c700 25% 50%,#2e8b17 50% 75%,#0063b3 75%)"
+# symboles texte (pas d'emoji) pour les cartes spéciales
+BIG = {"skip": "⊘", "reverse": "⇄", "+2": "+2", "+4": "+4", "wild": "★"}
+SMALL = {"skip": "Passe", "reverse": "Inversion", "+2": "+2", "+4": "+4", "wild": "Joker"}
 
 # clé : (libellé, valeur par défaut, aide)
 UNO_RULE_DEFS = {
@@ -422,18 +449,33 @@ def sort_key(card):
 
 def card_label(card):
     c, v = card.split(":")
-    return f"{COLORS[c]} {SMALL.get(v, v)}"
+    return SMALL[v] if c == "K" else f"{COLOR_NAMES[c]} {SMALL.get(v, v)}"
+
+
+def card_bg(card):
+    return GRAD if card == "K:wild" else CSS_COLORS[card.split(":")[0]]
 
 
 def card_html(card, cur_color):
+    """Carte de la défausse. La bordure indique la couleur en cours (utile après un joker)."""
     c, v = card.split(":")
     fg = "#000" if c == "Y" else "#fff"
     return (
-        f"<div style='display:inline-block;width:92px;height:132px;border-radius:14px;"
-        f"background:{CSS_COLORS[c]};color:{fg};font-size:38px;font-weight:800;line-height:120px;"
-        f"text-align:center;border:6px solid {CSS_COLORS[cur_color]};"
-        f"box-shadow:0 3px 10px rgba(0,0,0,.35)'>{BIG.get(v, v)}</div>"
+        f"<div style='width:84px;height:122px;border-radius:12px;background:{card_bg(card)};color:{fg};"
+        f"font-size:36px;font-weight:800;display:flex;align-items:center;justify-content:center;"
+        f"border:5px solid {CSS_COLORS[cur_color]};box-shadow:0 3px 10px rgba(0,0,0,.35);flex:0 0 auto'>"
+        f"{BIG.get(v, v)}</div>"
     )
+
+
+def backs_html(n):
+    n = min(n, 24)
+    cards = "".join(
+        f"<div style='width:26px;height:38px;border-radius:5px;background:linear-gradient(135deg,#5a1208,#b32410);"
+        f"margin-left:{0 if i == 0 else -15}px;box-shadow:-2px 0 4px rgba(0,0,0,.4)'></div>"
+        for i in range(n)
+    )
+    return f"<div style='display:flex;justify-content:center;padding:2px 0 8px'>{cards}</div>"
 
 
 def start_uno(room):
@@ -548,8 +590,21 @@ def uno_play(code, p, card, chosen, said_uno):
         touch(room)
 
 
-def on_play(code, p, card):
-    uno_play(code, p, card, ss.get("uno_color", "R"), bool(ss.get("uno_say", False)))
+def on_card_click(code, p, idx, card, u_id):
+    """1er clic = on sélectionne (la carte sort de l'éventail). 2e clic = on la joue."""
+    cur = (card, idx, u_id)
+    if ss.get("uno_sel") == cur:
+        ss.uno_sel = None
+        if not card.startswith("K:"):  # les jokers se jouent via le choix de couleur
+            uno_play(code, p, card, None, bool(ss.get("uno_say", False)))
+            ss["uno_say"] = False
+    else:
+        ss.uno_sel = cur
+
+
+def on_pick_color(code, p, card, color):
+    ss.uno_sel = None
+    uno_play(code, p, card, color, bool(ss.get("uno_say", False)))
     ss["uno_say"] = False
 
 
@@ -629,50 +684,54 @@ def uno_rules_ui(room, host):
         ss.seen_version = room["version"]
 
 
-def fan_css(u_id, hand, playable):
-    """CSS qui transforme les boutons de la main en éventail de cartes."""
-    n = len(hand)
-    W, H = 78, 114
-    step = 0 if n <= 1 else max(24, min(56, (640 - W) / (n - 1)))
-    spread = 0 if n <= 1 else min(48, 6 * (n - 1))
-    mid = (n - 1) / 2
-    css = [
-        ".st-key-uhand{display:flex !important;flex-direction:row !important;flex-wrap:nowrap !important;"
-        "justify-content:safe center;align-items:flex-end;gap:0 !important;padding:46px 28px 30px;"
-        "overflow-x:auto;overflow-y:hidden;}",
-        ".st-key-uhand > div{width:auto !important;flex:0 0 auto !important;}",
-    ]
-    for i, card in enumerate(hand):
-        c, v = card.split(":")
-        t = 0 if n <= 1 else (i - mid) / mid
-        angle = t * spread / 2
-        dy = (t ** 2) * 18 - (12 if playable[i] else 0)
-        ml = 0 if i == 0 else -(W - step)
-        if card == "K:wild":
-            bg = "linear-gradient(135deg,#d72600 25%,#e6c700 25% 50%,#2e8b17 50% 75%,#0063b3 75%)"
-        else:
-            bg = CSS_COLORS[c]
-        fg = "#000" if c == "Y" else "#fff"
-        fs = 20 if v in ("skip", "reverse", "wild") else 30
-        k = f"uc_{u_id}_{i}"
-        css.append(
-            f".st-key-{k}{{width:{W}px !important;margin-left:{ml:.1f}px;"
-            f"transform:translateY({dy:.1f}px) rotate({angle:.1f}deg);transform-origin:50% 140%;"
-            f"transition:transform .15s;position:relative;z-index:{i};}}"
-        )
-        css.append(
-            f".st-key-{k}:has(button:not(:disabled)):hover{{transform:translateY(-34px) rotate(0deg);z-index:99;}}"
-        )
-        css.append(
-            f".st-key-{k} button{{width:{W}px !important;height:{H}px !important;min-height:0 !important;"
-            f"padding:0 !important;border-radius:12px !important;background:{bg} !important;color:{fg} !important;"
-            f"border:3px solid #fff !important;box-shadow:0 4px 12px rgba(0,0,0,.45);}}"
-        )
-        css.append(
-            f".st-key-{k} button p{{font-size:{fs}px !important;font-weight:800 !important;color:{fg} !important;"
-            f"line-height:1 !important;text-shadow:0 1px 3px rgba(0,0,0,.5);}}"
-        )
-        css.append(f".st-key-{k} button:disabled{{opacity:.55;filter:saturate(.6);}}")
+ROW_MAX = 8  # cartes max par rangée de l'éventail
+
+
+def hand_rows(n):
+    if n <= ROW_MAX:
+        return [(0, n)]
+    k = -(-n // ROW_MAX)
+    size = -(-n // k)
+    return [(i, min(i + size, n)) for i in range(0, n, size)]
+
+
+def fan_css(u_id, hand, playable, sel):
+    """CSS qui transforme les boutons de la main en éventail (une ou plusieurs rangées)."""
+    css = []
+    for a, b in hand_rows(len(hand)):
+        m = b - a
+        mid = (m - 1) / 2
+        ratio = 0.72 if m <= 3 else 0.6 if m <= 5 else 0.52
+        spread = 0 if m <= 1 else min(34, 6 * (m - 1))
+        for i in range(a, b):
+            c, v = hand[i].split(":")
+            t = 0 if m <= 1 else (i - a - mid) / mid
+            angle = t * spread / 2
+            dy = (t ** 2) * 14 - (10 if playable[i] else 0)
+            bg = card_bg(hand[i])
+            fg = "#000" if c == "Y" else "#fff"
+            fs = 0.32 if v in ("skip", "reverse", "wild") else 0.40
+            ml = "0" if i == a else f"calc(var(--cw) * -{1 - ratio:.2f})"
+            k = f"uc_{u_id}_{i}"
+            if i == sel:
+                tr, z, sh = "translateY(-34px) rotate(0deg)", 99, "0 10px 22px rgba(0,0,0,.55)"
+            else:
+                tr, z, sh = f"translateY({dy:.1f}px) rotate({angle:.1f}deg)", i, "-3px 0 8px rgba(0,0,0,.35)"
+            css.append(
+                f".st-key-{k}{{width:var(--cw) !important;margin-left:{ml};transform:{tr};"
+                f"transform-origin:50% 140%;transition:transform .15s;position:relative;z-index:{z};}}"
+            )
+            css.append(
+                f".st-key-{k} button,.st-key-{k} button:hover,.st-key-{k} button:focus,.st-key-{k} button:active{{"
+                f"width:var(--cw) !important;height:calc(var(--cw) * 1.46) !important;min-height:0 !important;"
+                f"padding:0 !important;border-radius:calc(var(--cw) * .14) !important;background:{bg} !important;"
+                f"color:{fg} !important;border:none !important;outline:none !important;box-shadow:{sh};}}"
+            )
+            css.append(
+                f".st-key-{k} button p{{font-size:calc(var(--cw) * {fs}) !important;font-weight:800 !important;"
+                f"color:{fg} !important;line-height:1 !important;}}"
+            )
+            css.append(f".st-key-{k} button:disabled{{opacity:.5;filter:saturate(.6);}}")
     return "".join(css)
 
 
@@ -683,19 +742,24 @@ def uno_screen(room):
     code = room["code"]
     host = me == 0
     my_turn = u["turn"] == me and u["winner"] is None
+    cur = u["color"]
 
     st.subheader("🃏 UNO")
 
     n_opp = len(u["hands"][opp])
-    st.markdown(f"**{esc(names[opp])}** — {n_opp} carte{'s' if n_opp > 1 else ''} &nbsp; " + "🂠" * min(n_opp, 20))
+    st.markdown(f"**{esc(names[opp])}** — {n_opp} carte{'s' if n_opp > 1 else ''}")
+    st.markdown(backs_html(n_opp), unsafe_allow_html=True)
 
-    col_a, col_b = st.columns([1, 2], vertical_alignment="center")
-    col_a.markdown(card_html(u["discard"][-1], u["color"]), unsafe_allow_html=True)
-    with col_b:
-        st.markdown(f"Couleur en cours : **{COLORS[u['color']]} {COLOR_NAMES[u['color']]}**")
-        st.markdown(f"Pioche : {len(u['deck'])} cartes")
-        if u["pending"] > 0:
-            st.markdown(f"⚠️ **Pénalité en cours : +{u['pending']}**")
+    dot = (f"<span style='display:inline-block;width:14px;height:14px;border-radius:50%;"
+           f"background:{CSS_COLORS[cur]};vertical-align:middle;margin-right:6px'></span>")
+    pend = f"<br>⚠️ <b>Pénalité en cours : +{u['pending']}</b>" if u["pending"] else ""
+    st.markdown(
+        f"<div style='display:flex;align-items:center;justify-content:center;gap:18px;margin:4px 0 8px'>"
+        f"{card_html(u['discard'][-1], cur)}"
+        f"<div style='line-height:1.8'>{dot}Couleur : <b>{COLOR_NAMES[cur]}</b><br>"
+        f"Pioche : {len(u['deck'])} cartes{pend}</div></div>",
+        unsafe_allow_html=True,
+    )
 
     with st.expander("Historique", expanded=False):
         for line in reversed(u["log"][-8:]):
@@ -708,9 +772,9 @@ def uno_screen(room):
         if host:
             c1, c2 = st.columns(2)
             c1.button("🔁 Rejouer", on_click=start_game, args=(code,), type="primary", use_container_width=True)
-            c2.button("🏠 Retour au salon", on_click=back_to_lobby, args=(code,), use_container_width=True)
+            c2.button("🏠 Menu principal", on_click=back_to_lobby, args=(code,), use_container_width=True)
         else:
-            st.caption("L'hôte peut relancer une partie ou revenir au salon.")
+            st.caption("L'hôte peut relancer une partie ou revenir au menu.")
         return
 
     # statut
@@ -723,52 +787,59 @@ def uno_screen(room):
         st.info(f"⏳ Au tour de {names[opp]}" + (" — tu peux interrompre avec une carte identique." if r["jump_in"] else ""))
 
     hand = sorted(u["hands"][me], key=sort_key)
+    playable = [can_play(u, r, me, card) for card in hand]
+
+    # carte sélectionnée (sortie de l'éventail)
+    sel = ss.get("uno_sel")
+    sel_idx = None
+    if sel and sel[2] == u["id"] and sel[1] < len(hand) and hand[sel[1]] == sel[0] and playable[sel[1]]:
+        sel_idx = sel[1]
+    else:
+        ss.uno_sel = None
 
     # actions
-    a1, a2, a3 = st.columns(3)
-    a1.button(
-        f"📥 Piocher {u['pending']}" if u["pending"] else "📥 Piocher",
-        on_click=uno_draw,
-        args=(code, me),
-        disabled=not my_turn or (u["drawn"] and u["pending"] == 0),
-        use_container_width=True,
-    )
-    if my_turn and u["drawn"] and u["pending"] == 0:
-        a2.button("⏭️ Passer", on_click=uno_pass, args=(code, me), use_container_width=True)
-    if r["uno_call"] and u["uno_vuln"] == opp:
-        a3.button("🚨 Contre-UNO !", on_click=uno_challenge, args=(code, me), type="primary", use_container_width=True)
-
-    # options de jeu
-    o1, o2 = st.columns(2)
-    if any(h.startswith("K:") for h in hand):
-        ss.setdefault("uno_color", "R")
-        o1.radio(
-            "Couleur choisie (jokers)",
-            list(COLOR_NAMES),
-            format_func=lambda k: f"{COLORS[k]} {COLOR_NAMES[k]}",
-            key="uno_color",
-            horizontal=True,
+    with st.container(key="uact"):
+        st.button(
+            f"📥 Piocher {u['pending']}" if u["pending"] else "📥 Piocher",
+            key="act_draw", on_click=uno_draw, args=(code, me),
+            disabled=not my_turn or (u["drawn"] and u["pending"] == 0),
         )
-    if r["uno_call"] and len(hand) == 2:
-        o2.checkbox("📣 Annoncer UNO avec la prochaine carte", key="uno_say")
+        if my_turn and u["drawn"] and u["pending"] == 0:
+            st.button("⏭️ Passer", key="act_pass", on_click=uno_pass, args=(code, me))
+        if r["uno_call"] and u["uno_vuln"] == opp:
+            st.button("🚨 Contre-UNO !", key="act_counter", on_click=uno_challenge, args=(code, me), type="primary")
 
-    # main en éventail devant nous
-    st.markdown(f"**Ta main ({len(hand)})**")
-    playable = [can_play(u, r, me, card) for card in hand]
-    st.markdown(f"<style>{fan_css(u['id'], hand, playable)}</style>", unsafe_allow_html=True)
-    with st.container(key="uhand"):
-        for i, card in enumerate(hand):
-            val = card.split(":")[1]
-            st.button(
-                BIG.get(val, val),
-                key=f"uc_{u['id']}_{i}",
-                disabled=not playable[i],
-                on_click=on_play,
-                args=(code, me, card),
-            )
-    if my_turn and not any(playable) and not u["drawn"]:
+    if r["uno_call"] and len(hand) == 2:
+        st.checkbox("📣 Annoncer UNO avec ma prochaine carte", key="uno_say")
+
+    # choix de couleur pour les jokers / +4
+    if sel_idx is not None and hand[sel_idx].startswith("K:"):
+        extra = " — l'adversaire piochera 4 cartes" if hand[sel_idx] == "K:+4" else ""
+        st.markdown(f"**Choisis la couleur{extra}**")
+        with st.container(key="cpick"):
+            for col in "RYGB":
+                st.button(COLOR_NAMES[col], key=f"cp_{col}", on_click=on_pick_color, args=(code, me, hand[sel_idx], col))
+    elif sel_idx is not None:
+        st.caption("Clique à nouveau sur la carte pour la jouer.")
+    elif my_turn and any(playable):
+        st.caption("Clique sur une carte pour la sélectionner, puis re-clique dessus pour la jouer.")
+    elif my_turn and not u["drawn"]:
         st.caption("Aucune carte jouable : pioche !")
 
+    # main en éventail
+    st.markdown(f"**Ta main ({len(hand)})**")
+    st.markdown(f"<style>{fan_css(u['id'], hand, playable, sel_idx)}</style>", unsafe_allow_html=True)
+    for ri, (a, b) in enumerate(hand_rows(len(hand))):
+        with st.container(key=f"uhand_{ri}"):
+            for i in range(a, b):
+                val = hand[i].split(":")[1]
+                st.button(
+                    BIG.get(val, val),
+                    key=f"uc_{u['id']}_{i}",
+                    disabled=not playable[i],
+                    on_click=on_card_click,
+                    args=(code, me, i, hand[i], u["id"]),
+                )
 
 
 # ════════════════════════════════════════════════════════════════
@@ -823,13 +894,58 @@ def home_screen():
                 enter_room(code_in, seat)
 
 
+GLOBAL_CSS = "".join([
+    ":root{--cw:clamp(50px,13.5vw,80px);}",
+    # --- menu principal : 2 grandes cartes
+    ".st-key-pick_uno button,.st-key-pick_bac button{height:170px !important;border-radius:22px !important;"
+    "border:none !important;color:#fff !important;box-shadow:0 8px 20px rgba(0,0,0,.3);}",
+    ".st-key-pick_uno button,.st-key-pick_uno button:hover{background:linear-gradient(135deg,#e0361a,#8e1600) !important;}",
+    ".st-key-pick_bac button,.st-key-pick_bac button:hover{background:linear-gradient(135deg,#0a74d1,#2e9b1f) !important;}",
+    ".st-key-pick_uno button p,.st-key-pick_bac button p{font-size:34px !important;font-weight:900 !important;color:#fff !important;}",
+    ".st-key-pick_uno button:disabled,.st-key-pick_bac button:disabled{opacity:1 !important;cursor:default;}",
+    # --- UNO : rangées de boutons, éventail, choix de couleur
+    ".st-key-uact,.st-key-cpick{display:flex !important;flex-direction:row !important;flex-wrap:nowrap !important;gap:.5rem !important;}",
+    ".st-key-uact > div,.st-key-cpick > div{flex:1 1 0 !important;min-width:0 !important;width:auto !important;}",
+    ".st-key-uact button,.st-key-cpick button{width:100% !important;}",
+    ".st-key-cp_R button,.st-key-cp_Y button,.st-key-cp_G button,.st-key-cp_B button{height:52px !important;border:none !important;}",
+    ".st-key-cp_R button,.st-key-cp_R button:hover{background:#d72600 !important;color:#fff !important;}",
+    ".st-key-cp_Y button,.st-key-cp_Y button:hover{background:#e6c700 !important;color:#000 !important;}",
+    ".st-key-cp_G button,.st-key-cp_G button:hover{background:#2e8b17 !important;color:#fff !important;}",
+    ".st-key-cp_B button,.st-key-cp_B button:hover{background:#0063b3 !important;color:#fff !important;}",
+    ".st-key-cp_R button p,.st-key-cp_G button p,.st-key-cp_B button p{color:#fff !important;font-weight:800 !important;}",
+    ".st-key-cp_Y button p{color:#000 !important;font-weight:800 !important;}",
+    "[class*='st-key-uhand_']{display:flex !important;flex-direction:row !important;flex-wrap:nowrap !important;"
+    "justify-content:center;align-items:flex-end;gap:0 !important;padding:30px 6px 4px;}",
+    "[class*='st-key-uhand_'] > div{width:auto !important;flex:0 0 auto !important;}",
+    # --- barre du bas (téléphone uniquement)
+    ".st-key-bbar{display:none !important;}",
+    "@media (max-width:768px){",
+    ".st-key-pick_uno button,.st-key-pick_bac button{height:120px !important;}",
+    ".st-key-bbar{display:flex !important;flex-direction:row !important;align-items:center;gap:10px !important;"
+    "position:fixed;bottom:0;left:0;right:0;z-index:1000;padding:8px 12px calc(8px + env(safe-area-inset-bottom,0px));"
+    "background:rgba(24,26,38,.97);border-top:1px solid rgba(255,255,255,.18);}",
+    ".st-key-bbar > div{width:auto !important;flex:0 0 auto !important;}",
+    ".st-key-bbar > div:last-child{flex:1 1 auto !important;min-width:0 !important;}",
+    ".st-key-bbar button,.st-key-bbar button:hover{background:#3b3f5c !important;color:#fff !important;border:none !important;"
+    "min-height:0 !important;padding:.45rem .9rem !important;}",
+    ".st-key-bbar button p{color:#fff !important;font-weight:700;}",
+    ".st-key-bbar button:disabled{opacity:.45;}",
+    "[data-testid='stMainBlockContainer'],.block-container{padding:1rem .8rem 6.5rem !important;}",
+    "h1{font-size:1.7rem !important;} h2,h3{font-size:1.25rem !important;}",
+    "}",
+])
+
+
+def inject_css():
+    st.markdown(f"<style>{GLOBAL_CSS}</style>", unsafe_allow_html=True)
+
+
 def pick_game(code, game):
     with LOCK:
         room = ROOMS.get(code)
-        if not room or room["status"] != "lobby":
-            return
-        room["game"] = None if room["game"] == game else game  # re-cliquer = revenir au choix
-        touch(room)
+        if room and room["status"] == "lobby":
+            room["game"] = game
+            touch(room)
 
 
 def reset_scores(code):
@@ -840,25 +956,16 @@ def reset_scores(code):
             touch(room)
 
 
-def lobby_css(selected):
-    def extra(g):
-        if selected == g:
-            return ("border:4px solid #ffd43b !important;opacity:1 !important;"
-                    "box-shadow:0 0 0 5px rgba(255,212,59,.35),0 10px 24px rgba(0,0,0,.4);")
-        return f"opacity:{0.55 if selected else 1} !important;"
-
-    out = []
-    for key, bg, g in (
-        ("pick_uno", "linear-gradient(135deg,#e0361a,#8e1600)", "UNO"),
-        ("pick_bac", "linear-gradient(135deg,#0a74d1,#2e9b1f)", "Petit Bac"),
-    ):
-        out.append(
-            f".st-key-{key} button{{height:170px !important;border-radius:22px !important;"
-            f"background:{bg} !important;color:#fff !important;border:4px solid transparent;{extra(g)}}}"
-        )
-        out.append(f".st-key-{key} button p{{font-size:34px !important;font-weight:900 !important;color:#fff !important;}}")
-        out.append(f".st-key-{key} button:disabled{{{extra(g)}}}")
-    return "".join(out)
+def _live_line(room):
+    if room["status"] != "playing":
+        return ""
+    if room["game"] == "Petit Bac" and room["bac"]:
+        b = room["bac"]
+        return f"✏️ Manche {b['round']}/{room['bac_settings']['rounds']} · {b['scores'][0]} – {b['scores'][1]} pts"
+    if room["game"] == "UNO" and room["uno"]:
+        h = room["uno"]["hands"]
+        return f"🃏 Cartes en main · {len(h[0])} – {len(h[1])}"
+    return ""
 
 
 def scoreboard_html(room):
@@ -877,17 +984,36 @@ def scoreboard_html(room):
             f"<span style='font-weight:700'>{crown}{html.escape(n)}{you}</span>"
             f"<span style='font-size:26px;font-weight:900'>{wins[i]}</span></div>"
         )
-    live = ""
-    if room["status"] == "playing" and len(names) == 2:
-        if room["game"] == "Petit Bac" and room["bac"]:
-            b = room["bac"]
-            live = f"✏️ Manche {b['round']}/{room['bac_settings']['rounds']} · {b['scores'][0]} – {b['scores'][1]} pts"
-        elif room["game"] == "UNO" and room["uno"]:
-            h = room["uno"]["hands"]
-            live = f"🃏 Cartes en main · {len(h[0])} – {len(h[1])}"
-    if live:
+    live = _live_line(room)
+    if live and len(names) == 2:
         rows += f"<div style='font-size:13px;opacity:.8;margin-top:2px'>{live}</div>"
     return rows
+
+
+def scorebar_html(room):
+    names, wins = room["players"], room["wins"]
+    if len(names) < 2:
+        return "<div style='color:#fff;font-size:14px'>⏳ En attente d'un joueur…</div>"
+    tie = wins[0] == wins[1]
+    nm = "display:inline-block;max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom"
+    crown = lambda i: "👑 " if (not tie and wins[i] == max(wins)) else ""
+    live = _live_line(room)
+    return (
+        f"<div style='color:#fff;display:flex;justify-content:center;align-items:center;gap:8px;font-size:14px'>"
+        f"<span>{crown(0)}<span style='{nm}'>{html.escape(names[0])}</span> <b style='font-size:20px'>{wins[0]}</b></span>"
+        f"<span style='opacity:.6'>–</span>"
+        f"<span><b style='font-size:20px'>{wins[1]}</b> <span style='{nm}'>{html.escape(names[1])}</span>{crown(1).replace('👑 ', ' 👑')}</span>"
+        f"</div>"
+        + (f"<div style='color:#fff;text-align:center;font-size:12px;opacity:.75'>{live}</div>" if live else "")
+    )
+
+
+def bottom_bar(room):
+    host = ss.seat == 0
+    disabled = room["status"] == "lobby" and (room["game"] is None or not host)
+    with st.container(key="bbar"):
+        st.button("🏠 Menu", key="bar_menu", on_click=back_to_lobby, args=(room["code"],), disabled=disabled)
+        st.markdown(scorebar_html(room), unsafe_allow_html=True)
 
 
 def room_lobby(room):
@@ -895,18 +1021,21 @@ def room_lobby(room):
     code = room["code"]
     game = room["game"]
 
-    st.markdown(f"<style>{lobby_css(game)}</style>", unsafe_allow_html=True)
-    st.subheader("Choisis un jeu" if host else "L'hôte choisit le jeu…")
-    c1, c2 = st.columns(2)
-    c1.button("🃏 UNO", key="pick_uno", on_click=pick_game, args=(code, "UNO"), disabled=not host, use_container_width=True)
-    c2.button("✏️ Petit Bac", key="pick_bac", on_click=pick_game, args=(code, "Petit Bac"),
-              disabled=not host, use_container_width=True)
-
+    # ── MENU PRINCIPAL : seulement les deux grandes cartes
     if not game:
-        st.caption("Clique sur un jeu pour afficher ses réglages." if host else "⏳ En attente du choix de l'hôte…")
+        st.subheader("Choisis un jeu" if host else "L'hôte choisit le jeu…")
+        c1, c2 = st.columns(2)
+        c1.button("🃏 UNO", key="pick_uno", on_click=pick_game, args=(code, "UNO"),
+                  disabled=not host, use_container_width=True)
+        c2.button("✏️ Petit Bac", key="pick_bac", on_click=pick_game, args=(code, "Petit Bac"),
+                  disabled=not host, use_container_width=True)
+        if not host:
+            st.caption("⏳ En attente du choix de l'hôte…")
         return
 
-    st.markdown("---")
+    # ── MENU DU JEU : réglages (les cartes ont disparu)
+    if host:
+        st.button("← Menu principal", key="back_main", on_click=back_to_lobby, args=(code,))
     st.subheader(f"⚙️ Réglages — {game}")
     if game == "Petit Bac":
         bac_settings_ui(room, host)
@@ -918,10 +1047,8 @@ def room_lobby(room):
 
     st.markdown("---")
     if host:
-        b1, b2 = st.columns([2, 1])
-        b1.button(f"▶️ Lancer {game}", type="primary", on_click=start_game, args=(code,),
+        st.button(f"▶️ Lancer {game}", type="primary", on_click=start_game, args=(code,),
                   disabled=not can_start, use_container_width=True)
-        b2.button("↩️ Changer de jeu", on_click=pick_game, args=(code, game), use_container_width=True)
     else:
         st.caption("⏳ En attente que l'hôte lance la partie…")
 
@@ -931,35 +1058,38 @@ def room_screen(room):
     watcher(room["code"])
     me = ss.seat
     names = room["players"]
+    code = room["code"]
 
     with st.sidebar:
         st.markdown("### 🏆 Tableau des scores")
         st.markdown(scoreboard_html(room), unsafe_allow_html=True)
-        st.caption(f"Salle **{room['code']}** · victoires de la session")
+        st.caption(f"Salle **{code}** · victoires de la session")
         if len(names) < 2:
             st.markdown("⏳ _en attente d'un joueur_")
         else:
-            st.button("↺ Remettre les scores à zéro", on_click=reset_scores, args=(room["code"],),
+            st.button("↺ Remettre les scores à zéro", key="side_reset", on_click=reset_scores, args=(code,),
                       use_container_width=True)
-        if me == 0 and room["status"] == "playing":
-            st.button("🏠 Retour au salon", on_click=back_to_lobby, args=(room["code"],), use_container_width=True)
-        st.button("🚪 Quitter la salle", on_click=leave_room, use_container_width=True)
+        menu_off = room["status"] == "lobby" and (room["game"] is None or me != 0)
+        st.button("🏠 Menu principal", key="side_menu", on_click=back_to_lobby, args=(code,),
+                  disabled=menu_off, use_container_width=True)
+        st.button("🚪 Quitter la salle", key="side_leave", on_click=leave_room, use_container_width=True)
 
-    st.title(f"🎲 Salle {room['code']}")
+    st.title(f"🎲 Salle {code}")
 
     if len(names) < 2:
-        st.info(f"Partage ce code avec ton adversaire : **{room['code']}**\n\nLa page se mettra à jour toute seule.")
-        return
-
-    if room["status"] == "lobby":
+        st.info(f"Partage ce code avec ton adversaire : **{code}**\n\nLa page se mettra à jour toute seule.")
+    elif room["status"] == "lobby":
         room_lobby(room)
     elif room["game"] == "Petit Bac":
         bac_screen(room)
     else:
         uno_screen(room)
 
+    bottom_bar(room)
+
 
 def main():
+    inject_css()
     init_session()
     if ss.room and ss.room not in ROOMS:
         ss.room, ss.seat = None, None
