@@ -3,6 +3,7 @@
 Multijoueur en réseau via un état partagé côté serveur (st.cache_resource).
 Lancer :  streamlit run app.py
 """
+import copy
 import html
 import random
 import re
@@ -13,6 +14,7 @@ import unicodedata
 import uuid
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Hub de jeux à 2", page_icon="🎲", layout="centered")
 
@@ -163,6 +165,7 @@ def bac_new_round(room):
     b["answers"] = [{}, {}]
     b["submitted"] = [False, False]
     b["first"] = None
+    b["stop_at"] = None  # moment où le 1er joueur a cliqué sur « Terminé »
     b["rejects"] = [set(), set()]  # rejects[i] = catégories refusées par i chez l'adversaire
     b["ready"] = [False, False]
     b["phase"] = "playing"  # playing | review | finished
@@ -214,17 +217,44 @@ def bac_ready(code, me):
         touch(room)
 
 
-def bac_toggle_reject(code, me, cat, key):
+AUTO_STOP_JS = """<script>
+(function () {
+  var tries = 0;
+  function go() {
+    var btns = window.parent.document.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      if (btns[i].innerText && btns[i].innerText.indexOf('Terminé') > -1 && !btns[i].disabled) {
+        btns[i].click();
+        return;
+      }
+    }
+    if (tries++ < 12) setTimeout(go, 250);
+  }
+  setTimeout(go, 150);
+})();
+</script>"""
+
+
+def bac_confirm_contest(code, me, cats, bid, rnd):
     with LOCK:
         room = ROOMS.get(code)
         if not room or not room["bac"]:
             return
-        rej = room["bac"]["rejects"][me]
-        if ss.get(key):
-            rej.add(cat)
-        else:
-            rej.discard(cat)
+        room["bac"]["rejects"][me] = {c for c in cats if ss.get(f"rej_{bid}_{rnd}_{c}")}
         touch(room)
+
+
+def bac_finalize_if_due(code):
+    """Si un joueur a fini et que l'autre ne répond pas (onglet fermé…), on termine la manche."""
+    with LOCK:
+        room = ROOMS.get(code)
+        if not room or room["status"] != "playing" or room["game"] != "Petit Bac" or not room["bac"]:
+            return
+        b = room["bac"]
+        if b["phase"] == "playing" and b["stop_at"] and time.time() - b["stop_at"] > 5:
+            b["submitted"] = [True, True]
+            b["phase"] = "review"
+            touch(room)
 
 
 def add_custom_category():
@@ -303,7 +333,7 @@ def bac_screen(room):
     names = room["players"]
     host = me == 0
 
-    st.subheader(f"🔤 Petit Bac — manche {b['round']}/{s['rounds']}")
+    st.subheader(f"Petit Bac — manche {b['round']}/{s['rounds']}")
     st.markdown(
         f"**{esc(names[0])}** : {b['scores'][0]} pts &nbsp;|&nbsp; **{esc(names[1])}** : {b['scores'][1]} pts"
     )
@@ -315,10 +345,10 @@ def bac_screen(room):
             unsafe_allow_html=True,
         )
         if b["submitted"][me]:
-            st.success(f"Tes réponses sont envoyées. En attente de {names[opp]}…")
+            st.success(f"Manche terminée — résultats dans un instant…")
         else:
-            if b["submitted"][opp]:
-                st.warning(f"⏱️ {names[opp]} a terminé ! Envoie vite tes réponses.")
+            if b["stop_at"] is not None:
+                st.warning(f"⏱️ {esc(names[opp])} a terminé : la manche s'arrête, envoi de tes réponses…")
             with st.form(f"bac_form_{b['id']}_{b['round']}"):
                 vals = {}
                 for cat in s["cats"]:
@@ -330,12 +360,15 @@ def bac_screen(room):
                 with LOCK:
                     b["answers"][me] = dict(vals)
                     b["submitted"][me] = True
-                    if b["first"] is None:
-                        b["first"] = me
+                    if b["stop_at"] is None:
+                        b["stop_at"] = time.time()
                     if all(b["submitted"]):
                         b["phase"] = "review"
                     touch(room)
                 st.rerun()
+            elif b["stop_at"] is not None:
+                # l'adversaire a fini : on envoie automatiquement nos réponses (ce qui est déjà tapé)
+                components.html(AUTO_STOP_JS, height=0)
         st.caption("Barème : 2 pts si ta réponse est différente de celle de l'autre, 1 pt si vous avez la même, 0 si vide ou mauvaise lettre.")
 
     elif b["phase"] == "review":
@@ -350,17 +383,25 @@ def bac_screen(room):
         opp_answers = [(c, b["answers"][opp].get(c, "")) for c in s["cats"] if b["answers"][opp].get(c, "").strip()]
         if opp_answers:
             with st.expander(f"⚖️ Contester les réponses de {names[opp]}"):
-                st.caption("Coche la ou les réponses que tu juges fausses : elles passent à 0 point.")
+                st.caption("Coche la ou les réponses que tu juges fausses, puis confirme : elles passeront à 0 point.")
+                cats_c = []
                 for cat, a in opp_answers:
                     key = f"rej_{b['id']}_{b['round']}_{cat}"
                     if key not in ss:
                         ss[key] = cat in b["rejects"][me]
-                    st.checkbox(
-                        f"{esc(cat)} : {esc(a)}",
-                        key=key,
-                        on_change=bac_toggle_reject,
-                        args=(room["code"], me, cat, key),
-                    )
+                    st.checkbox(f"{esc(cat)} : {esc(a)}", key=key)
+                    cats_c.append(cat)
+                st.button(
+                    "✅ Confirmer la contestation",
+                    key=f"conf_{b['id']}_{b['round']}",
+                    type="primary",
+                    on_click=bac_confirm_contest,
+                    args=(room["code"], me, cats_c, b["id"], b["round"]),
+                    use_container_width=True,
+                )
+                n_c = len(b["rejects"][me])
+                if n_c:
+                    st.caption(f"Contestation enregistrée : {n_c} réponse{'s' if n_c > 1 else ''} à 0 point.")
 
         last = b["round"] >= s["rounds"]
         if b["ready"][me]:
@@ -500,6 +541,7 @@ def start_uno(room):
         "drawn": False,
         "winner": None,
         "uno_vuln": None,
+        "uno_said": [False, False],
         "log": [f"🎬 Début de partie — {room['players'][first]} commence."],
     }
 
@@ -549,63 +591,126 @@ def _uno_ctx(code):
     return room, room["uno"], room["uno_rules"]
 
 
-def uno_play(code, p, card, chosen, said_uno):
+def apply_card(u, r, p, card, chosen, last):
+    """Pose une carte sur l'état u (modifié en place). `last` = dernière carte du groupe joué."""
+    c, v = card.split(":")
+    u["uno_vuln"] = None
+    u["hands"][p].remove(card)
+    u["discard"].append(card)
+    u["color"] = chosen if c == "K" else c
+    u["drawn"] = False
+    if not u["hands"][p]:
+        u["winner"] = p
+        return
+    nxt = 1 - p
+    if v in ("skip", "reverse"):
+        nxt = p
+    elif v == "+2":
+        u["pending"] += 2
+    elif v == "+4":
+        u["pending"] += 4
+    elif v in ("7", "0") and r["seven_zero"] and last:
+        u["hands"][0], u["hands"][1] = u["hands"][1], u["hands"][0]
+    u["turn"] = nxt
+    if last:
+        if r["uno_call"] and len(u["hands"][p]) == 1 and not u["uno_said"][p]:
+            u["uno_vuln"] = p
+        u["uno_said"][p] = False
+
+
+def _simulate(u, r, p, seq, chosen):
+    """Joue la séquence sur une copie. Renvoie la copie, ou None si un coup est illégal."""
+    w = copy.deepcopy(u)
+    for k, card in enumerate(seq):
+        if k:
+            w["turn"] = p  # on enchaîne : c'est toujours à nous
+        if card not in w["hands"][p] or not can_play(w, r, p, card):
+            return None
+        if card.startswith("K:") and chosen not in ("R", "Y", "G", "B"):
+            return None
+        apply_card(w, r, p, card, chosen, k == len(seq) - 1)
+    return w
+
+
+def plan_group(u, r, p, cards, chosen=None):
+    """Plusieurs cartes de MÊME VALEUR (couleurs libres). Renvoie (ordre, état_final) ou None."""
+    if not cards or len({c.split(":")[1] for c in cards}) != 1:
+        return None
+    idx = list(range(len(cards)))
+    orders = [idx] + [[i] + [j for j in idx if j != i] for i in idx if can_play(u, r, p, cards[i])]
+    for o in orders:
+        seq = [cards[i] for i in o]
+        w = _simulate(u, r, p, seq, chosen)
+        if w is not None:
+            return seq, w
+    return None
+
+
+def uno_play_group(code, p, cards, chosen):
     with LOCK:
         room, u, r = _uno_ctx(code)
-        if not room or card not in u["hands"][p] or not can_play(u, r, p, card):
+        if not room or u["winner"] is not None:
             return
+        res = plan_group(u, r, p, cards, chosen)
+        if res is None:
+            return
+        seq, w = res
         name = room["players"][p]
-        c, v = card.split(":")
         jump = u["turn"] != p
-        u["uno_vuln"] = None
-        u["hands"][p].remove(card)
-        u["discard"].append(card)
-        u["color"] = chosen if c == "K" else c
-        u["drawn"] = False
-        u["log"].append(
-            f"{'⚡ ' if jump else ''}{name} joue {card_label(card)}"
-            + (f" → {COLOR_NAMES[u['color']]}" if c == "K" else "")
+        w["log"].append(
+            f"{'⚡ ' if jump else ''}{name} joue {', '.join(card_label(c) for c in seq)}"
+            + (f" → {COLOR_NAMES[w['color']]}" if seq[0].startswith("K:") else "")
         )
-        if not u["hands"][p]:
-            u["winner"] = p
+        if w["winner"] is not None:
             room["wins"][p] += 1
-            u["log"].append(f"🏆 {name} a gagné !")
-            touch(room)
-            return
-        nxt = 1 - p
-        if v in ("skip", "reverse"):
-            nxt = p
-        elif v == "+2":
-            u["pending"] += 2
-        elif v == "+4":
-            u["pending"] += 4
-        elif v in ("7", "0") and r["seven_zero"]:
-            u["hands"][0], u["hands"][1] = u["hands"][1], u["hands"][0]
-            u["log"].append("🔀 Les mains sont échangées !")
-        u["turn"] = nxt
-        if r["uno_call"] and len(u["hands"][p]) == 1 and not said_uno:
-            u["uno_vuln"] = p
-        elif len(u["hands"][p]) == 1:
-            u["log"].append(f"📣 {name} annonce UNO !")
+            w["log"].append(f"🏆 {name} a gagné !")
+        room["uno"] = w
         touch(room)
 
 
-def on_card_click(code, p, idx, card, u_id):
-    """1er clic = on sélectionne (la carte sort de l'éventail). 2e clic = on la joue."""
-    cur = (card, idx, u_id)
-    if ss.get("uno_sel") == cur:
-        ss.uno_sel = None
-        if not card.startswith("K:"):  # les jokers se jouent via le choix de couleur
-            uno_play(code, p, card, None, bool(ss.get("uno_say", False)))
-            ss["uno_say"] = False
-    else:
-        ss.uno_sel = cur
+def uno_say(code, p):
+    with LOCK:
+        room, u, r = _uno_ctx(code)
+        if not room or u["winner"] is not None or not r["uno_call"] or len(u["hands"][p]) > 2:
+            return
+        u["uno_said"][p] = True
+        if u["uno_vuln"] == p:
+            u["uno_vuln"] = None
+        u["log"].append(f"📣 {room['players'][p]} annonce UNO !")
+        touch(room)
 
 
-def on_pick_color(code, p, card, color):
+def clear_sel():
     ss.uno_sel = None
-    uno_play(code, p, card, color, bool(ss.get("uno_say", False)))
-    ss["uno_say"] = False
+
+
+def on_card_click(code, p, idx, card, u_id):
+    """Clic sur une carte : sélection (elle sort de l'éventail), ajout d'une carte de même valeur,
+    ou, si elle est déjà sélectionnée, on joue tout le groupe."""
+    sel = ss.get("uno_sel")
+    items = list(sel["items"]) if sel and sel["id"] == u_id else []
+    it = (idx, card)
+    val = card.split(":")[1]
+    if it in items:
+        if card.startswith("K:"):  # jokers : on joue via le choix de couleur
+            items.remove(it)
+            ss.uno_sel = {"id": u_id, "items": items} if items else None
+        else:
+            ss.uno_sel = None
+            uno_play_group(code, p, [c for _, c in items], None)
+    else:
+        if items and items[0][1].split(":")[1] == val:
+            items.append(it)
+        else:
+            items = [it]
+        ss.uno_sel = {"id": u_id, "items": items}
+
+
+def on_pick_color(code, p, color):
+    sel = ss.get("uno_sel")
+    ss.uno_sel = None
+    if sel:
+        uno_play_group(code, p, [c for _, c in sel["items"]], color)
 
 
 def uno_draw(code, p):
@@ -615,6 +720,7 @@ def uno_draw(code, p):
             return
         name = room["players"][p]
         u["uno_vuln"] = None
+        u["uno_said"][p] = False
         if u["pending"] > 0:
             n = draw_cards(u, p, u["pending"])
             u["log"].append(f"📥 {name} pioche {n} cartes et passe son tour.")
@@ -695,7 +801,7 @@ def hand_rows(n):
     return [(i, min(i + size, n)) for i in range(0, n, size)]
 
 
-def fan_css(u_id, hand, playable, sel):
+def fan_css(u_id, hand, enabled, selected):
     """CSS qui transforme les boutons de la main en éventail (une ou plusieurs rangées)."""
     css = []
     for a, b in hand_rows(len(hand)):
@@ -707,20 +813,25 @@ def fan_css(u_id, hand, playable, sel):
             c, v = hand[i].split(":")
             t = 0 if m <= 1 else (i - a - mid) / mid
             angle = t * spread / 2
-            dy = (t ** 2) * 14 - (10 if playable[i] else 0)
+            dy = (t ** 2) * 14 - (10 if enabled[i] else 0)
             bg = card_bg(hand[i])
             fg = "#000" if c == "Y" else "#fff"
             fs = 0.32 if v in ("skip", "reverse", "wild") else 0.40
             ml = "0" if i == a else f"calc(var(--cw) * -{1 - ratio:.2f})"
             k = f"uc_{u_id}_{i}"
-            if i == sel:
+            if i in selected:
                 tr, z, sh = "translateY(-34px) rotate(0deg)", 99, "0 10px 22px rgba(0,0,0,.55)"
             else:
                 tr, z, sh = f"translateY({dy:.1f}px) rotate({angle:.1f}deg)", i, "-3px 0 8px rgba(0,0,0,.35)"
             css.append(
                 f".st-key-{k}{{width:var(--cw) !important;margin-left:{ml};transform:{tr};"
-                f"transform-origin:50% 140%;transition:transform .15s;position:relative;z-index:{z};}}"
+                f"transform-origin:50% 140%;transition:transform .12s;position:relative;z-index:{z};}}"
             )
+            if c != "K":
+                # retour visuel immédiat au clic (avant même la réponse du serveur)
+                css.append(
+                    f".st-key-{k}:has(button:focus:not(:disabled)){{transform:translateY(-34px) rotate(0deg);z-index:99;}}"
+                )
             css.append(
                 f".st-key-{k} button,.st-key-{k} button:hover,.st-key-{k} button:focus,.st-key-{k} button:active{{"
                 f"width:var(--cw) !important;height:calc(var(--cw) * 1.46) !important;min-height:0 !important;"
@@ -735,6 +846,94 @@ def fan_css(u_id, hand, playable, sel):
     return "".join(css)
 
 
+@st.fragment
+def uno_hand_zone(code, me):
+    """Zone de jeu (actions + main). C'est un fragment : un clic sur une carte ne relance
+    que cette zone, pas toute la page → plus de latence à la sélection."""
+    room = ROOMS.get(code)
+    if (not room or room["status"] != "playing" or room["game"] != "UNO" or not room["uno"]
+            or room["version"] != ss.get("seen_version")):
+        st.rerun()  # l'état a changé : on relance toute la page
+        return
+    u, r = room["uno"], room["uno_rules"]
+    opp = 1 - me
+    my_turn = u["turn"] == me and u["winner"] is None
+
+    hand = sorted(u["hands"][me], key=sort_key)
+    playable = [can_play(u, r, me, card) for card in hand]
+
+    # sélection courante (une ou plusieurs cartes de même valeur)
+    sel = ss.get("uno_sel")
+    items = []
+    if sel and sel["id"] == u["id"] and all(i < len(hand) and hand[i] == c for i, c in sel["items"]):
+        items = sel["items"]
+    else:
+        ss.uno_sel = None
+    sel_idx = {i for i, _ in items}
+    sel_val = items[0][1].split(":")[1] if items else None
+    enabled = [
+        (i in sel_idx) or playable[i] or (sel_val is not None and hand[i].split(":")[1] == sel_val)
+        for i in range(len(hand))
+    ]
+
+    # actions
+    show_uno = r["uno_call"] and len(hand) <= 2 and (len(hand) == 2 or u["uno_vuln"] == me)
+    with st.container(key="uact"):
+        st.button(
+            f"Piocher {u['pending']}" if u["pending"] else "Piocher",
+            key="act_draw", on_click=uno_draw, args=(code, me),
+            disabled=not my_turn or (u["drawn"] and u["pending"] == 0),
+        )
+        if my_turn and u["drawn"] and u["pending"] == 0:
+            st.button("Passer", key="act_pass", on_click=uno_pass, args=(code, me))
+        if show_uno and not u["uno_said"][me]:
+            st.button("UNO !", key="act_uno", on_click=uno_say, args=(code, me))
+        if r["uno_call"] and u["uno_vuln"] == opp:
+            st.button("Contre-UNO !", key="act_counter", on_click=uno_challenge, args=(code, me), type="primary")
+    if r["uno_call"] and u["uno_said"][me]:
+        st.caption("📣 UNO annoncé : joue ta carte.")
+
+    # aide / choix de couleur
+    if items:
+        cards = [c for _, c in items]
+        black = cards[0].startswith("K:")
+        ok = plan_group(u, r, me, cards, "R" if black else None) is not None
+        if not ok:
+            st.warning("Cette combinaison ne peut pas être jouée.")
+        elif black:
+            extra = f" — l'adversaire piochera {4 * len(cards)} cartes" if cards[0] == "K:+4" else ""
+            st.markdown(f"**Choisis la couleur{extra}**")
+            with st.container(key="cpick"):
+                for col in "RYGB":
+                    st.button(COLOR_NAMES[col], key=f"cp_{col}", on_click=on_pick_color, args=(code, me, col))
+        else:
+            n = len(cards)
+            st.caption(
+                f"{n} carte{'s' if n > 1 else ''} sélectionnée{'s' if n > 1 else ''} — re-clique sur l'une d'elles "
+                "pour jouer. Tu peux ajouter d'autres cartes de même valeur."
+            )
+        st.button("Annuler la sélection", key="act_cancel", on_click=clear_sel)
+    elif my_turn and any(playable):
+        st.caption("Clique une carte pour la sélectionner (et d'autres de même valeur), re-clique pour jouer.")
+    elif my_turn and not u["drawn"]:
+        st.caption("Aucune carte jouable : pioche !")
+
+    # main en éventail
+    st.markdown(f"**Ta main ({len(hand)})**")
+    st.markdown(f"<style>{fan_css(u['id'], hand, enabled, sel_idx)}</style>", unsafe_allow_html=True)
+    for ri, (a, b) in enumerate(hand_rows(len(hand))):
+        with st.container(key=f"uhand_{ri}"):
+            for i in range(a, b):
+                val = hand[i].split(":")[1]
+                st.button(
+                    BIG.get(val, val),
+                    key=f"uc_{u['id']}_{i}",
+                    disabled=not enabled[i],
+                    on_click=on_card_click,
+                    args=(code, me, i, hand[i], u["id"]),
+                )
+
+
 def uno_screen(room):
     u, r = room["uno"], room["uno_rules"]
     me, opp = ss.seat, 1 - ss.seat
@@ -744,7 +943,7 @@ def uno_screen(room):
     my_turn = u["turn"] == me and u["winner"] is None
     cur = u["color"]
 
-    st.subheader("🃏 UNO")
+    st.subheader("UNO")
 
     n_opp = len(u["hands"][opp])
     st.markdown(f"**{esc(names[opp])}** — {n_opp} carte{'s' if n_opp > 1 else ''}")
@@ -777,7 +976,6 @@ def uno_screen(room):
             st.caption("L'hôte peut relancer une partie ou revenir au menu.")
         return
 
-    # statut
     if my_turn:
         if u["pending"] > 0:
             st.warning(f"⚠️ Réponds par une carte autorisée ou pioche {u['pending']} cartes.")
@@ -786,60 +984,7 @@ def uno_screen(room):
     else:
         st.info(f"⏳ Au tour de {names[opp]}" + (" — tu peux interrompre avec une carte identique." if r["jump_in"] else ""))
 
-    hand = sorted(u["hands"][me], key=sort_key)
-    playable = [can_play(u, r, me, card) for card in hand]
-
-    # carte sélectionnée (sortie de l'éventail)
-    sel = ss.get("uno_sel")
-    sel_idx = None
-    if sel and sel[2] == u["id"] and sel[1] < len(hand) and hand[sel[1]] == sel[0] and playable[sel[1]]:
-        sel_idx = sel[1]
-    else:
-        ss.uno_sel = None
-
-    # actions
-    with st.container(key="uact"):
-        st.button(
-            f"📥 Piocher {u['pending']}" if u["pending"] else "📥 Piocher",
-            key="act_draw", on_click=uno_draw, args=(code, me),
-            disabled=not my_turn or (u["drawn"] and u["pending"] == 0),
-        )
-        if my_turn and u["drawn"] and u["pending"] == 0:
-            st.button("⏭️ Passer", key="act_pass", on_click=uno_pass, args=(code, me))
-        if r["uno_call"] and u["uno_vuln"] == opp:
-            st.button("🚨 Contre-UNO !", key="act_counter", on_click=uno_challenge, args=(code, me), type="primary")
-
-    if r["uno_call"] and len(hand) == 2:
-        st.checkbox("📣 Annoncer UNO avec ma prochaine carte", key="uno_say")
-
-    # choix de couleur pour les jokers / +4
-    if sel_idx is not None and hand[sel_idx].startswith("K:"):
-        extra = " — l'adversaire piochera 4 cartes" if hand[sel_idx] == "K:+4" else ""
-        st.markdown(f"**Choisis la couleur{extra}**")
-        with st.container(key="cpick"):
-            for col in "RYGB":
-                st.button(COLOR_NAMES[col], key=f"cp_{col}", on_click=on_pick_color, args=(code, me, hand[sel_idx], col))
-    elif sel_idx is not None:
-        st.caption("Clique à nouveau sur la carte pour la jouer.")
-    elif my_turn and any(playable):
-        st.caption("Clique sur une carte pour la sélectionner, puis re-clique dessus pour la jouer.")
-    elif my_turn and not u["drawn"]:
-        st.caption("Aucune carte jouable : pioche !")
-
-    # main en éventail
-    st.markdown(f"**Ta main ({len(hand)})**")
-    st.markdown(f"<style>{fan_css(u['id'], hand, playable, sel_idx)}</style>", unsafe_allow_html=True)
-    for ri, (a, b) in enumerate(hand_rows(len(hand))):
-        with st.container(key=f"uhand_{ri}"):
-            for i in range(a, b):
-                val = hand[i].split(":")[1]
-                st.button(
-                    BIG.get(val, val),
-                    key=f"uc_{u['id']}_{i}",
-                    disabled=not playable[i],
-                    on_click=on_card_click,
-                    args=(code, me, i, hand[i], u["id"]),
-                )
+    uno_hand_zone(code, me)
 
 
 # ════════════════════════════════════════════════════════════════
@@ -850,6 +995,7 @@ def uno_screen(room):
 @st.fragment(run_every=2)
 def watcher(code):
     """Vérifie toutes les 2 s si l'état de la salle a changé et relance la page si oui."""
+    bac_finalize_if_due(code)
     room = ROOMS.get(code)
     if room is None or room["version"] != ss.get("seen_version"):
         st.rerun()
@@ -907,6 +1053,8 @@ GLOBAL_CSS = "".join([
     ".st-key-uact,.st-key-cpick{display:flex !important;flex-direction:row !important;flex-wrap:nowrap !important;gap:.5rem !important;}",
     ".st-key-uact > div,.st-key-cpick > div{flex:1 1 0 !important;min-width:0 !important;width:auto !important;}",
     ".st-key-uact button,.st-key-cpick button{width:100% !important;}",
+    ".st-key-act_uno button,.st-key-act_uno button:hover{background:#d72600 !important;color:#fff !important;border:none !important;}",
+    ".st-key-act_uno button p{color:#fff !important;font-weight:900 !important;}",
     ".st-key-cp_R button,.st-key-cp_Y button,.st-key-cp_G button,.st-key-cp_B button{height:52px !important;border:none !important;}",
     ".st-key-cp_R button,.st-key-cp_R button:hover{background:#d72600 !important;color:#fff !important;}",
     ".st-key-cp_Y button,.st-key-cp_Y button:hover{background:#e6c700 !important;color:#000 !important;}",
@@ -961,10 +1109,7 @@ def _live_line(room):
         return ""
     if room["game"] == "Petit Bac" and room["bac"]:
         b = room["bac"]
-        return f"✏️ Manche {b['round']}/{room['bac_settings']['rounds']} · {b['scores'][0]} – {b['scores'][1]} pts"
-    if room["game"] == "UNO" and room["uno"]:
-        h = room["uno"]["hands"]
-        return f"🃏 Cartes en main · {len(h[0])} – {len(h[1])}"
+        return f"Manche {b['round']}/{room['bac_settings']['rounds']} · {b['scores'][0]} – {b['scores'][1]} pts"
     return ""
 
 
@@ -997,14 +1142,12 @@ def scorebar_html(room):
     tie = wins[0] == wins[1]
     nm = "display:inline-block;max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom"
     crown = lambda i: "👑 " if (not tie and wins[i] == max(wins)) else ""
-    live = _live_line(room)
     return (
         f"<div style='color:#fff;display:flex;justify-content:center;align-items:center;gap:8px;font-size:14px'>"
         f"<span>{crown(0)}<span style='{nm}'>{html.escape(names[0])}</span> <b style='font-size:20px'>{wins[0]}</b></span>"
         f"<span style='opacity:.6'>–</span>"
         f"<span><b style='font-size:20px'>{wins[1]}</b> <span style='{nm}'>{html.escape(names[1])}</span>{crown(1).replace('👑 ', ' 👑')}</span>"
         f"</div>"
-        + (f"<div style='color:#fff;text-align:center;font-size:12px;opacity:.75'>{live}</div>" if live else "")
     )
 
 
@@ -1025,9 +1168,9 @@ def room_lobby(room):
     if not game:
         st.subheader("Choisis un jeu" if host else "L'hôte choisit le jeu…")
         c1, c2 = st.columns(2)
-        c1.button("🃏 UNO", key="pick_uno", on_click=pick_game, args=(code, "UNO"),
+        c1.button("UNO", key="pick_uno", on_click=pick_game, args=(code, "UNO"),
                   disabled=not host, use_container_width=True)
-        c2.button("✏️ Petit Bac", key="pick_bac", on_click=pick_game, args=(code, "Petit Bac"),
+        c2.button("Petit Bac", key="pick_bac", on_click=pick_game, args=(code, "Petit Bac"),
                   disabled=not host, use_container_width=True)
         if not host:
             st.caption("⏳ En attente du choix de l'hôte…")
