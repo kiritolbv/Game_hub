@@ -4,6 +4,7 @@ Multijoueur en réseau via un état partagé côté serveur (st.cache_resource).
 Lancer :  streamlit run app.py
 """
 import copy
+import difflib
 import html
 import random
 import re
@@ -11,6 +12,7 @@ import string
 import threading
 import time
 import unicodedata
+import urllib.parse
 import uuid
 
 import streamlit as st
@@ -66,8 +68,10 @@ def create_room(name, token):
             "wins": [0, 0],
             "bac_settings": {"cats": BAC_POOL[:6], "rounds": 3, "excluded": list("KQWXYZ")},
             "uno_rules": default_uno_rules(),
+            "blind_settings": {"rounds": 5, "seconds": 10, "builtin": True, "custom": []},
             "bac": None,
             "uno": None,
+            "blind": None,
         }
         return code
 
@@ -99,7 +103,7 @@ def leave_room():
             else:
                 room["players"].pop(1)
                 room["tokens"].pop(1)
-                room.update(status="lobby", bac=None, uno=None)
+                room.update(status="lobby", bac=None, uno=None, blind=None)
                 touch(room)
     ss.room = None
     ss.seat = None
@@ -112,7 +116,7 @@ def back_to_lobby(code):
     with LOCK:
         room = ROOMS.get(code)
         if room:
-            room.update(status="lobby", game=None, bac=None, uno=None)
+            room.update(status="lobby", game=None, bac=None, uno=None, blind=None)
             touch(room)
 
 
@@ -127,6 +131,14 @@ def start_game(code):
                 return
             room["bac"] = {"id": uuid.uuid4().hex[:6], "round": 0, "used": [], "scores": [0, 0]}
             bac_new_round(room)
+        elif room["game"] == "Blind Test":
+            bs = room["blind_settings"]
+            pool = blind_pool(bs)
+            if not pool:
+                return
+            songs = random.sample(pool, min(bs["rounds"], len(pool)))
+            room["blind"] = {"id": uuid.uuid4().hex[:6], "round": 0, "songs": songs, "total": len(songs), "scores": [0, 0]}
+            blind_new_round(room)
         else:
             start_uno(room)
         room["status"] = "playing"
@@ -988,6 +1000,497 @@ def uno_screen(room):
 
 
 # ════════════════════════════════════════════════════════════════
+#  BLIND TEST
+# ════════════════════════════════════════════════════════════════
+
+BT_CATS = [("artist", "Artiste"), ("title", "Titre"), ("feat", "Featuring"), ("year", "Année")]
+
+# Playlist intégrée : (id vidéo YouTube, début du refrain en secondes, artiste, titre, featuring, année)
+# ⚠️ IDs et minutages saisis de mémoire : à vérifier / ajuster ici si une vidéo ou un refrain tombe à côté.
+BLIND_SONGS = [
+    ("OPf0YbXqDm0", 55, "Mark Ronson", "Uptown Funk", "Bruno Mars", 2014),
+    ("RgKAFK5djSk", 8, "Wiz Khalifa", "See You Again", "Charlie Puth", 2015),
+    ("CvBfHwUxHIk", 28, "Rihanna", "Umbrella", "JAY-Z", 2007),
+    ("h5EofwRzit0", 50, "Daft Punk", "Get Lucky", "Pharrell Williams & Nile Rodgers", 2013),
+    ("8UVNT4wvIGY", 52, "Gotye", "Somebody That I Used to Know", "Kimbra", 2011),
+    ("kffacxfA7G4", 12, "Justin Bieber", "Baby", "Ludacris", 2010),
+    ("uelHwf8o7_U", 20, "Eminem", "Love the Way You Lie", "Rihanna", 2010),
+    ("vk6014HuxcE", 58, "JAY-Z", "Empire State of Mind", "Alicia Keys", 2009),
+    ("gOMhN-hfMtY", 4, "Eminem", "Stan", "Dido", 2000),
+    ("QK8mJJJvaes", 26, "Macklemore & Ryan Lewis", "Thrift Shop", "Wanz", 2012),
+    ("PT2_F-1esPk", 44, "The Chainsmokers", "Closer", "Halsey", 2016),
+    ("YqeW9_5kURI", 45, "Major Lazer & DJ Snake", "Lean On", "MØ", 2015),
+    ("JRfuAukYTKg", 44, "David Guetta", "Titanium", "Sia", 2011),
+    ("tg00YEETFzg", 45, "Rihanna", "We Found Love", "Calvin Harris", 2011),
+    ("0KSOMA3QBU0", 50, "Katy Perry", "Dark Horse", "Juicy J", 2013),
+    ("iEPTlhBmwRg", 48, "Maroon 5", "Moves Like Jagger", "Christina Aguilera", 2011),
+    ("ViwtNLUqkMY", 28, "Beyoncé", "Crazy in Love", "JAY-Z", 2003),
+    ("fPO76Jlnz6c", 2, "Coolio", "Gangsta's Paradise", "L.V.", 1995),
+    ("DUT5rEU6pqM", 36, "Shakira", "Hips Don't Lie", "Wyclef Jean", 2006),
+    ("pRpeEdMmmQ0", 50, "Shakira", "Waka Waka (This Time for Africa)", "Freshlyground", 2010),
+    ("F57P9C4SAW4", 48, "Katy Perry", "California Gurls", "Snoop Dogg", 2010),
+    ("O-zpOMYRi0w", 52, "Iggy Azalea", "Fancy", "Charli XCX", 2014),
+    ("kJQP7kiw5Fk", 56, "Luis Fonsi", "Despacito", "Daddy Yankee", 2017),
+    ("Io0fBr1XBUA", 50, "The Chainsmokers", "Don't Let Me Down", "Daya", 2016),
+    ("hHUbLv4ThOo", 40, "Pitbull", "Timber", "Kesha", 2013),
+]
+
+
+def bt_song(t):
+    return {"id": t[0], "start": t[1], "artist": t[2], "title": t[3], "feat": t[4], "year": t[5]}
+
+
+def blind_pool(s):
+    pool = [bt_song(t) for t in BLIND_SONGS] if s["builtin"] else []
+    return pool + list(s["custom"])
+
+
+def parse_yt_id(t):
+    t = (t or "").strip()
+    m = re.search(r"(?:v=|youtu\.be/|embed/|shorts/)([A-Za-z0-9_-]{11})", t)
+    if m:
+        return m.group(1)
+    return t if re.fullmatch(r"[A-Za-z0-9_-]{11}", t) else None
+
+
+def parse_time(t):
+    t = (t or "").strip()
+    if re.fullmatch(r"\d+", t):
+        return int(t)
+    m = re.fullmatch(r"(\d+):(\d{1,2})", t)
+    return int(m.group(1)) * 60 + int(m.group(2)) if m else None
+
+
+# ── correction automatique (tolérante) ; les joueurs peuvent ensuite la contester
+def _sq(t):
+    t = (t or "").lower()
+    for a, b in (("ø", "o"), ("æ", "ae"), ("œ", "oe"), ("ß", "ss"), ("&", " and ")):
+        t = t.replace(a, b)
+    t = unicodedata.normalize("NFD", t)
+    t = "".join(ch for ch in t if unicodedata.category(ch) != "Mn")
+    t = re.sub(r"[^a-z0-9 ]", " ", t).strip()
+    t = re.sub(r"^(the|le|la|les|l) ", "", t)
+    return re.sub(r"[^a-z0-9]", "", t)
+
+
+def _names(text):
+    return [n.strip() for n in re.split(r"\s*(?:,|&|/|\band\b|\bet\b|\bfeat\.?|\bft\.?)\s*", text or "", flags=re.I) if n.strip()]
+
+
+def bt_variants(song, key):
+    if key == "artist":
+        return [song["artist"]] + _names(song["artist"])
+    if key == "feat":
+        return [song["feat"]] + _names(song["feat"])
+    t = song["title"]
+    return [t, re.sub(r"\(.*?\)", "", t)] + re.findall(r"\((.*?)\)", t)
+
+
+def bt_match(ans, variants):
+    a = _sq(ans)
+    if not a:
+        return False
+    for v in variants:
+        q = _sq(v)
+        if not q:
+            continue
+        if a == q:
+            return True
+        short, long_ = sorted((a, q), key=len)
+        if len(short) >= 5 and len(short) >= 0.45 * len(long_) and short in long_:
+            return True
+        if len(q) >= 4 and difflib.SequenceMatcher(None, a, q).ratio() >= 0.84:
+            return True
+    return False
+
+
+def bt_auto(song, key, ans):
+    if key == "year":
+        m = re.search(r"\d{4}", ans or "")
+        return bool(m) and int(m.group()) == int(song["year"])
+    if key == "feat" and not (song["feat"] or "").strip():
+        a = _sq(ans)
+        return a == "" or a.startswith(("aucun", "non", "pas", "rien", "sans", "no", "none"))
+    return bt_match(ans, bt_variants(song, key))
+
+
+def bt_truth(song, key):
+    v = song[key]
+    return str(v) if str(v).strip() else "— (aucun)"
+
+
+def bt_score(b):
+    """ok = décision finale (correction auto, inversée si l'adversaire a contesté/accepté)."""
+    song = b["song"]
+    ok, auto, pts = [{}, {}], [{}, {}], [0, 0]
+    for p in (0, 1):
+        for key, _ in BT_CATS:
+            auto[p][key] = bt_auto(song, key, b["answers"][p].get(key, ""))
+            ok[p][key] = auto[p][key] != (key in b["flips"][1 - p])
+        n = sum(ok[p].values())
+        pts[p] = 5 if n == len(BT_CATS) else n  # bonus : 5 points au lieu de 4
+    return {"ok": ok, "auto": auto, "pts": pts}
+
+
+def blind_new_round(room):
+    b = room["blind"]
+    b["round"] += 1
+    b["song"] = b["songs"][b["round"] - 1]
+    b["rid"] = uuid.uuid4().hex[:6]
+    b["answers"] = [{}, {}]
+    b["submitted"] = [False, False]
+    b["flips"] = [set(), set()]  # flips[i] = décisions inversées par i sur les réponses de l'adversaire
+    b["ready"] = [False, False]
+    b["phase"] = "guess"  # guess | review | finished
+    b["guess_at"] = time.time()
+
+
+def blind_advance(room):
+    b = room["blind"]
+    res = bt_score(b)
+    b["scores"][0] += res["pts"][0]
+    b["scores"][1] += res["pts"][1]
+    if b["round"] >= b["total"]:
+        b["phase"] = "finished"
+        if b["scores"][0] != b["scores"][1]:
+            room["wins"][0 if b["scores"][0] > b["scores"][1] else 1] += 1
+    else:
+        blind_new_round(room)
+
+
+def blind_ready(code, me):
+    with LOCK:
+        room = ROOMS.get(code)
+        if not room or not room["blind"]:
+            return
+        b = room["blind"]
+        b["ready"][me] = True
+        if all(b["ready"]):
+            blind_advance(room)
+        touch(room)
+
+
+def blind_confirm_flips(code, me, keys, rid):
+    with LOCK:
+        room = ROOMS.get(code)
+        if not room or not room["blind"]:
+            return
+        room["blind"]["flips"][me] = {k for k in keys if ss.get(f"bf_{rid}_{k}")}
+        touch(room)
+
+
+def blind_finalize_if_due(code):
+    """Filet de sécurité : si un joueur ne répond plus, on passe quand même à la correction."""
+    with LOCK:
+        room = ROOMS.get(code)
+        if not room or room["status"] != "playing" or room["game"] != "Blind Test" or not room["blind"]:
+            return
+        b = room["blind"]
+        if b["phase"] == "guess" and time.time() - b["guess_at"] > room["blind_settings"]["seconds"] + 14:
+            b["submitted"] = [True, True]
+            b["phase"] = "review"
+            touch(room)
+
+
+def bt_clear_custom(code):
+    with LOCK:
+        room = ROOMS.get(code)
+        if room:
+            room["blind_settings"]["custom"] = []
+            touch(room)
+
+
+BT_GUESS_HTML = """<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+html,body{margin:0;padding:0;background:transparent;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;text-align:center;overflow:hidden}
+#yt{position:absolute;left:0;top:0;width:200px;height:200px;opacity:.01;pointer-events:none}
+svg{display:block;margin:4px auto 0}
+#msg{font-size:14px;opacity:.8;margin-top:2px;min-height:18px}
+#snd{display:none;margin-top:4px;font-size:12px;background:none;border:1px solid rgba(128,128,128,.55);color:inherit;border-radius:14px;padding:3px 12px;cursor:pointer}
+</style></head><body>
+<div id="yt"></div>
+<svg width="170" height="170" viewBox="0 0 170 170">
+<circle cx="85" cy="85" r="74" fill="none" stroke="rgba(128,128,128,.25)" stroke-width="12"/>
+<circle id="ring" cx="85" cy="85" r="74" fill="none" stroke="#f59e0b" stroke-width="12" transform="rotate(180 85 85)"/>
+<text id="num" x="85" y="85" text-anchor="middle" dominant-baseline="central" font-size="66" font-weight="800" fill="currentColor">3</text>
+</svg>
+<div id="msg">Prépare-toi…</div>
+<button id="snd">Pas de son ? Touche ici</button>
+<script>
+var D=__DUR__, S=__START__, LEAD=__LEAD__, VID="__ID__";
+try{document.body.style.color=getComputedStyle(window.parent.document.body).color;}catch(e){}
+var C=2*Math.PI*74;
+var ring=document.getElementById('ring'),num=document.getElementById('num'),msg=document.getElementById('msg'),snd=document.getElementById('snd');
+var player=null,ready=false,started=false,finished=false,t0=performance.now(),tStart=0,timer=null;
+function setRing(f,color){var L=Math.max(0,Math.min(1,f))*C;ring.setAttribute('stroke-dasharray',L+' '+C);ring.setAttribute('stroke-dashoffset',-(C-L));ring.setAttribute('stroke',color);}
+function press(){
+  var tries=0;
+  (function go(){
+    var btns=[];
+    try{btns=window.parent.document.querySelectorAll('button');}catch(e){}
+    for(var i=0;i<btns.length;i++){
+      if(btns[i].innerText&&btns[i].innerText.indexOf('Valider mes')>-1&&!btns[i].disabled){btns[i].click();return;}
+    }
+    if(tries++<12)setTimeout(go,250);
+  })();
+}
+function begin(){
+  started=true;tStart=performance.now();snd.style.display='inline-block';
+  if(player&&ready){try{player.seekTo(S,true);player.playVideo();}catch(e){}}
+}
+function finish(){
+  finished=true;if(timer)clearInterval(timer);
+  setRing(0,'#ef4444');num.textContent='0';msg.textContent='Temps écoulé !';
+  try{if(player)player.pauseVideo();}catch(e){}
+  press();
+}
+function tick(){
+  if(finished)return;
+  var now=performance.now();
+  if(!started){
+    var rem=LEAD-(now-t0)/1000;
+    if(rem>0){num.textContent=Math.ceil(rem);setRing(1,'#f59e0b');msg.textContent='Prépare-toi…';}
+    else if(ready||(now-t0)>(LEAD+5)*1000){begin();}
+    else{num.textContent='…';msg.textContent='Chargement du son…';}
+  }
+  if(started&&!finished){
+    var r=D-(now-tStart)/1000;
+    if(r<=0){finish();return;}
+    num.textContent=Math.ceil(r);setRing(r/D,r<=3?'#ef4444':'#4f8cff');msg.textContent='Écoute bien !';
+  }
+  requestAnimationFrame(tick);
+}
+snd.onclick=function(){try{if(player){player.unMute();player.setVolume(100);player.seekTo(S+Math.max(0,(performance.now()-tStart)/1000),true);player.playVideo();}}catch(e){}};
+window.onYouTubeIframeAPIReady=function(){
+  var pv={autoplay:0,controls:0,playsinline:1,rel:0,modestbranding:1,disablekb:1,fs:0,iv_load_policy:3,start:S};
+  if(location.origin&&location.origin!=='null')pv.origin=location.origin;
+  player=new YT.Player('yt',{videoId:VID,width:200,height:200,playerVars:pv,events:{onReady:function(e){ready=true;try{e.target.unMute();e.target.setVolume(100);}catch(x){}}}});
+};
+var tag=document.createElement('script');tag.src='https://www.youtube.com/iframe_api';document.head.appendChild(tag);
+timer=setInterval(tick,250);
+requestAnimationFrame(tick);
+</script></body></html>"""
+
+
+def _yt_id(song):
+    return re.sub(r"[^A-Za-z0-9_-]", "", str(song["id"]))
+
+
+def bt_guess_html(song, seconds):
+    return (BT_GUESS_HTML.replace("__ID__", _yt_id(song)).replace("__START__", str(int(song["start"])))
+            .replace("__DUR__", str(int(seconds))).replace("__LEAD__", "3"))
+
+
+def bt_reveal_html(song):
+    return (
+        "<style>html,body{margin:0;height:100%;background:transparent}</style>"
+        f"<iframe style='width:100%;height:100%;border:0;border-radius:12px' "
+        f"src='https://www.youtube.com/embed/{_yt_id(song)}?start={int(song['start'])}&autoplay=1&rel=0&playsinline=1' "
+        "allow='autoplay; encrypted-media; picture-in-picture; fullscreen' allowfullscreen></iframe>"
+    )
+
+
+def bt_table(b, res, me, opp, names):
+    song = b["song"]
+
+    def cell(p, key):
+        ans = b["answers"][p].get(key, "")
+        a = html.escape(ans) if ans.strip() else "—"
+        ok, auto = res["ok"][p][key], res["auto"][p][key]
+        note = ""
+        if ok != auto:
+            note = " <i>(accepté)</i>" if ok else " <i>(contesté)</i>"
+        return f"{'✅' if ok else '❌'} {a}{note} <b>+{1 if ok else 0}</b>"
+
+    out = [
+        "<table style='width:100%;border-collapse:collapse;font-size:15px'>",
+        f"<tr style='text-align:left;opacity:.7'><th style='padding:6px 4px'></th><th>Réponse</th><th>Toi</th>"
+        f"<th>{html.escape(names[opp])}</th></tr>",
+    ]
+    for key, label in BT_CATS:
+        out.append(
+            f"<tr style='border-top:1px solid rgba(128,128,128,.3)'>"
+            f"<td style='padding:6px 4px;font-weight:600'>{label}</td>"
+            f"<td><b>{html.escape(bt_truth(song, key))}</b></td><td>{cell(me, key)}</td><td>{cell(opp, key)}</td></tr>"
+        )
+    bonus = lambda p: "<b>+1</b>" if res["pts"][p] == 5 else "—"
+    out.append(
+        f"<tr style='border-top:1px solid rgba(128,128,128,.3)'><td style='padding:6px 4px;font-weight:600'>Bonus 4/4</td>"
+        f"<td></td><td>{bonus(me)}</td><td>{bonus(opp)}</td></tr>"
+    )
+    out.append("</table>")
+    return "".join(out)
+
+
+def blind_settings_ui(room, host):
+    s = room["blind_settings"]
+    if not host:
+        n = len(blind_pool(s))
+        st.markdown(
+            f"**Manches :** {min(s['rounds'], max(n, 1))}  \n**Durée de l'extrait :** {s['seconds']} s  \n"
+            f"**Morceaux disponibles :** {n}"
+        )
+        return
+    secs = st.slider("Durée de l'extrait (secondes)", 5, 30, s["seconds"], key="bt_secs")
+    builtin = st.checkbox("Utiliser la playlist intégrée", value=s["builtin"], key="bt_builtin")
+
+    with st.expander("Ajouter mes propres morceaux (lien YouTube)"):
+        with st.form("bt_add", clear_on_submit=True):
+            url = st.text_input("Lien YouTube")
+            start_t = st.text_input("Début de l'extrait / du refrain (secondes ou mm:ss)", placeholder="1:05")
+            artist = st.text_input("Artiste")
+            title = st.text_input("Titre")
+            feat = st.text_input("Featuring (vide s'il n'y en a pas)")
+            year = st.text_input("Année", max_chars=4)
+            add = st.form_submit_button("Ajouter ce morceau")
+        if add:
+            vid, st_s = parse_yt_id(url), parse_time(start_t)
+            if not vid or st_s is None or not artist.strip() or not title.strip() or not re.fullmatch(r"\d{4}", year.strip()):
+                st.error("Vérifie le lien, le début, l'artiste, le titre et l'année (4 chiffres).")
+            else:
+                with LOCK:
+                    s["custom"].append({"id": vid, "start": st_s, "artist": artist.strip(), "title": title.strip(),
+                                        "feat": feat.strip(), "year": int(year)})
+                    touch(room)
+                ss.seen_version = room["version"]
+                st.rerun()
+        if s["custom"]:
+            st.caption(f"{len(s['custom'])} morceau(x) perso : " + " · ".join(f"{c['artist']} – {c['title']}" for c in s["custom"]))
+            st.button("Vider mes morceaux", key="bt_clear", on_click=bt_clear_custom, args=(room["code"],))
+
+    pool_n = len(blind_pool({**s, "builtin": builtin}))
+    if pool_n == 0:
+        st.warning("Aucun morceau : active la playlist intégrée ou ajoute les tiens.")
+        rounds = s["rounds"]
+    elif pool_n == 1:
+        st.caption("1 morceau disponible : 1 manche.")
+        rounds = 1
+    else:
+        maxr = min(20, pool_n)
+        rounds = st.slider("Nombre de manches", 1, maxr, min(s["rounds"], maxr), key="bt_rounds")
+        st.caption(f"{pool_n} morceaux disponibles.")
+    new = {"rounds": rounds, "seconds": secs, "builtin": builtin, "custom": s["custom"]}
+    if new != s:
+        with LOCK:
+            room["blind_settings"] = new
+            touch(room)
+        ss.seen_version = room["version"]
+
+
+def blind_screen(room):
+    b, s = room["blind"], room["blind_settings"]
+    me, opp = ss.seat, 1 - ss.seat
+    names = room["players"]
+    host = me == 0
+
+    st.subheader(f"Blind Test — manche {b['round']}/{b['total']}")
+    st.markdown(
+        f"**{esc(names[0])}** : {b['scores'][0]} pts &nbsp;|&nbsp; **{esc(names[1])}** : {b['scores'][1]} pts"
+    )
+
+    if b["phase"] == "guess":
+        # ⚠️ ce composant doit rester le 1er élément variable (contenu constant pendant la manche)
+        components.html(bt_guess_html(b["song"], s["seconds"]), height=250)
+        if b["submitted"][me]:
+            st.success(f"Réponses envoyées. En attente de {names[opp]}…")
+        else:
+            if b["submitted"][opp]:
+                st.info(f"{esc(names[opp])} a déjà validé.")
+            with st.form(f"bt_form_{b['id']}_{b['rid']}"):
+                vals = {}
+                for key, label in BT_CATS:
+                    vals[key] = st.text_input(
+                        label, key=f"bt_{b['id']}_{b['rid']}_{key}",
+                        max_chars=4 if key == "year" else None,
+                        placeholder="ex : 2014" if key == "year" else None,
+                    )
+                go = st.form_submit_button("Valider mes réponses", type="primary", use_container_width=True)
+            if go:
+                with LOCK:
+                    b["answers"][me] = dict(vals)
+                    b["submitted"][me] = True
+                    if all(b["submitted"]):
+                        b["phase"] = "review"
+                    touch(room)
+                st.rerun()
+        st.caption("1 point par catégorie, 5 points si tu trouves les 4. Les réponses sont validées automatiquement à la fin du temps.")
+
+    elif b["phase"] == "review":
+        song = b["song"]
+        components.html(bt_reveal_html(song), height=300)
+        st.markdown(
+            f"[Ouvrir la vidéo sur YouTube](https://www.youtube.com/watch?v={_yt_id(song)}&t={int(song['start'])})"
+            f" · [Rechercher le titre](https://www.youtube.com/results?search_query="
+            f"{urllib.parse.quote_plus(song['artist'] + ' ' + song['title'])})"
+        )
+        res = bt_score(b)
+        flips_on_me = [lbl for key, lbl in BT_CATS if key in b["flips"][opp] and b["answers"][me].get(key, "").strip()]
+        if flips_on_me:
+            st.warning(f"⚖️ {esc(names[opp])} a modifié la correction de : {esc(', '.join(flips_on_me))}")
+        st.markdown(bt_table(b, res, me, opp, names), unsafe_allow_html=True)
+        st.markdown(f"**Points de la manche :** toi {res['pts'][me]} · {esc(names[opp])} {res['pts'][opp]}")
+
+        opp_rows = [(k, lbl, b["answers"][opp].get(k, "")) for k, lbl in BT_CATS if b["answers"][opp].get(k, "").strip()]
+        if opp_rows:
+            with st.expander(f"⚖️ Contester les réponses de {names[opp]}"):
+                st.caption("Coche une réponse pour inverser la décision : retirer un point accordé, ou en donner un refusé. "
+                           "Puis confirme.")
+                keys = []
+                for k, lbl, a in opp_rows:
+                    key = f"bf_{b['rid']}_{k}"
+                    if key not in ss:
+                        ss[key] = k in b["flips"][me]
+                    action = "contester (retirer le point)" if res["auto"][opp][k] else "accepter quand même (donner le point)"
+                    st.checkbox(f"{lbl} — « {esc(a)} » : {action}", key=key)
+                    keys.append(k)
+                st.button(
+                    "✅ Confirmer la contestation",
+                    key=f"bt_conf_{b['rid']}",
+                    type="primary",
+                    on_click=blind_confirm_flips,
+                    args=(room["code"], me, keys, b["rid"]),
+                    use_container_width=True,
+                )
+                n_c = len(b["flips"][me])
+                if n_c:
+                    st.caption(f"Décision enregistrée sur {n_c} réponse{'s' if n_c > 1 else ''}.")
+
+        last = b["round"] >= b["total"]
+        if b["ready"][me]:
+            st.info(f"En attente de {names[opp]}…")
+        else:
+            st.button(
+                "Voir le résultat final" if last else "Manche suivante",
+                type="primary",
+                on_click=blind_ready,
+                args=(room["code"], me),
+                use_container_width=True,
+            )
+
+    else:  # finished
+        a, c = b["scores"]
+        st.markdown("### 🏆 Résultat final")
+        if a == c:
+            st.info("Égalité parfaite !")
+        else:
+            w = 0 if a > c else 1
+            (st.success if w == me else st.error)(
+                f"{'Tu as gagné' if w == me else names[w] + ' a gagné'} ! ({max(a, c)} – {min(a, c)})"
+            )
+        if host:
+            c1, c2 = st.columns(2)
+            c1.button("🔁 Rejouer", on_click=start_game, args=(code_of(room),), type="primary", use_container_width=True)
+            c2.button("🏠 Menu principal", on_click=back_to_lobby, args=(code_of(room),), use_container_width=True)
+        else:
+            st.caption("L'hôte peut relancer une partie ou revenir au menu.")
+
+
+def code_of(room):
+    return room["code"]
+
+
+# ════════════════════════════════════════════════════════════════
 #  SALON / ACCUEIL
 # ════════════════════════════════════════════════════════════════
 
@@ -996,6 +1499,7 @@ def uno_screen(room):
 def watcher(code):
     """Vérifie toutes les 2 s si l'état de la salle a changé et relance la page si oui."""
     bac_finalize_if_due(code)
+    blind_finalize_if_due(code)
     room = ROOMS.get(code)
     if room is None or room["version"] != ss.get("seen_version"):
         st.rerun()
@@ -1047,8 +1551,13 @@ GLOBAL_CSS = "".join([
     "border:none !important;color:#fff !important;box-shadow:0 8px 20px rgba(0,0,0,.3);}",
     ".st-key-pick_uno button,.st-key-pick_uno button:hover{background:linear-gradient(135deg,#e0361a,#8e1600) !important;}",
     ".st-key-pick_bac button,.st-key-pick_bac button:hover{background:linear-gradient(135deg,#0a74d1,#2e9b1f) !important;}",
-    ".st-key-pick_uno button p,.st-key-pick_bac button p{font-size:34px !important;font-weight:900 !important;color:#fff !important;}",
+    ".st-key-pick_uno button p,.st-key-pick_bac button p{font-size:28px !important;font-weight:900 !important;color:#fff !important;}",
     ".st-key-pick_uno button:disabled,.st-key-pick_bac button:disabled{opacity:1 !important;cursor:default;}",
+    ".st-key-pick_blind button{height:170px !important;border-radius:22px !important;border:none !important;"
+    "color:#fff !important;box-shadow:0 8px 20px rgba(0,0,0,.3);}",
+    ".st-key-pick_blind button,.st-key-pick_blind button:hover{background:linear-gradient(135deg,#7b2ff7,#c026d3) !important;}",
+    ".st-key-pick_blind button p{font-size:28px !important;font-weight:900 !important;color:#fff !important;}",
+    ".st-key-pick_blind button:disabled{opacity:1 !important;cursor:default;}",
     # --- UNO : rangées de boutons, éventail, choix de couleur
     ".st-key-uact,.st-key-cpick{display:flex !important;flex-direction:row !important;flex-wrap:nowrap !important;gap:.5rem !important;}",
     ".st-key-uact > div,.st-key-cpick > div{flex:1 1 0 !important;min-width:0 !important;width:auto !important;}",
@@ -1068,7 +1577,7 @@ GLOBAL_CSS = "".join([
     # --- barre du bas (téléphone uniquement)
     ".st-key-bbar{display:none !important;}",
     "@media (max-width:768px){",
-    ".st-key-pick_uno button,.st-key-pick_bac button{height:120px !important;}",
+    ".st-key-pick_uno button,.st-key-pick_bac button,.st-key-pick_blind button{height:120px !important;}",
     ".st-key-bbar{display:flex !important;flex-direction:row !important;align-items:center;gap:10px !important;"
     "position:fixed;bottom:0;left:0;right:0;z-index:1000;padding:8px 12px calc(8px + env(safe-area-inset-bottom,0px));"
     "background:rgba(24,26,38,.97);border-top:1px solid rgba(255,255,255,.18);}",
@@ -1167,10 +1676,12 @@ def room_lobby(room):
     # ── MENU PRINCIPAL : seulement les deux grandes cartes
     if not game:
         st.subheader("Choisis un jeu" if host else "L'hôte choisit le jeu…")
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         c1.button("UNO", key="pick_uno", on_click=pick_game, args=(code, "UNO"),
                   disabled=not host, use_container_width=True)
         c2.button("Petit Bac", key="pick_bac", on_click=pick_game, args=(code, "Petit Bac"),
+                  disabled=not host, use_container_width=True)
+        c3.button("Blind Test", key="pick_blind", on_click=pick_game, args=(code, "Blind Test"),
                   disabled=not host, use_container_width=True)
         if not host:
             st.caption("⏳ En attente du choix de l'hôte…")
@@ -1184,6 +1695,9 @@ def room_lobby(room):
         bac_settings_ui(room, host)
         s = room["bac_settings"]
         can_start = 5 <= len(s["cats"]) <= 10 and len(s["excluded"]) < 26
+    elif game == "Blind Test":
+        blind_settings_ui(room, host)
+        can_start = len(blind_pool(room["blind_settings"])) >= 1
     else:
         uno_rules_ui(room, host)
         can_start = True
@@ -1225,6 +1739,8 @@ def room_screen(room):
         room_lobby(room)
     elif room["game"] == "Petit Bac":
         bac_screen(room)
+    elif room["game"] == "Blind Test":
+        blind_screen(room)
     else:
         uno_screen(room)
 
