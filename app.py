@@ -68,7 +68,8 @@ def create_room(name, token):
             "wins": [0, 0],
             "bac_settings": {"cats": BAC_POOL[:6], "rounds": 3, "excluded": list("KQWXYZ")},
             "uno_rules": default_uno_rules(),
-            "blind_settings": {"rounds": 5, "seconds": 10, "builtin": True, "custom": []},
+            "blind_settings": {"rounds": 5, "seconds": 30, "unlimited": False, "extra": False, "extra_seconds": 10,
+                               "builtin": True, "custom": []},
             "bac": None,
             "uno": None,
             "blind": None,
@@ -136,7 +137,7 @@ def start_game(code):
             pool = blind_pool(bs)
             if not pool:
                 return
-            songs = random.sample(pool, min(bs["rounds"], len(pool)))
+            songs = blind_pick(pool, min(bs["rounds"], len(pool)))
             room["blind"] = {"id": uuid.uuid4().hex[:6], "round": 0, "songs": songs, "total": len(songs), "scores": [0, 0]}
             blind_new_round(room)
         else:
@@ -1003,46 +1004,128 @@ def uno_screen(room):
 #  BLIND TEST
 # ════════════════════════════════════════════════════════════════
 
-BT_CATS = [("artist", "Artiste"), ("title", "Titre"), ("feat", "Featuring"), ("year", "Année")]
-
-# Playlist intégrée : (id vidéo YouTube, début du refrain en secondes, artiste, titre, featuring, année)
-# ⚠️ IDs et minutages saisis de mémoire : à vérifier / ajuster ici si une vidéo ou un refrain tombe à côté.
+# Playlist intégrée : (id YouTube, début du refrain en s, artiste PRINCIPAL, titre, [featurings], genre, langue, année)
+# ⚠️ Les identifiants YouTube et les minutages sont saisis de mémoire (sauf « Zitti e buoni » et « Soldi »,
+#    vérifiés en ligne) : si une vidéo est indisponible ou si le refrain tombe à côté, corrige la ligne ici.
 BLIND_SONGS = [
-    ("OPf0YbXqDm0", 55, "Mark Ronson", "Uptown Funk", "Bruno Mars", 2014),
-    ("RgKAFK5djSk", 8, "Wiz Khalifa", "See You Again", "Charlie Puth", 2015),
-    ("CvBfHwUxHIk", 28, "Rihanna", "Umbrella", "JAY-Z", 2007),
-    ("h5EofwRzit0", 50, "Daft Punk", "Get Lucky", "Pharrell Williams & Nile Rodgers", 2013),
-    ("8UVNT4wvIGY", 52, "Gotye", "Somebody That I Used to Know", "Kimbra", 2011),
-    ("kffacxfA7G4", 12, "Justin Bieber", "Baby", "Ludacris", 2010),
-    ("uelHwf8o7_U", 20, "Eminem", "Love the Way You Lie", "Rihanna", 2010),
-    ("vk6014HuxcE", 58, "JAY-Z", "Empire State of Mind", "Alicia Keys", 2009),
-    ("gOMhN-hfMtY", 4, "Eminem", "Stan", "Dido", 2000),
-    ("QK8mJJJvaes", 26, "Macklemore & Ryan Lewis", "Thrift Shop", "Wanz", 2012),
-    ("PT2_F-1esPk", 44, "The Chainsmokers", "Closer", "Halsey", 2016),
-    ("YqeW9_5kURI", 45, "Major Lazer & DJ Snake", "Lean On", "MØ", 2015),
-    ("JRfuAukYTKg", 44, "David Guetta", "Titanium", "Sia", 2011),
-    ("tg00YEETFzg", 45, "Rihanna", "We Found Love", "Calvin Harris", 2011),
-    ("0KSOMA3QBU0", 50, "Katy Perry", "Dark Horse", "Juicy J", 2013),
-    ("iEPTlhBmwRg", 48, "Maroon 5", "Moves Like Jagger", "Christina Aguilera", 2011),
-    ("ViwtNLUqkMY", 28, "Beyoncé", "Crazy in Love", "JAY-Z", 2003),
-    ("fPO76Jlnz6c", 2, "Coolio", "Gangsta's Paradise", "L.V.", 1995),
-    ("DUT5rEU6pqM", 36, "Shakira", "Hips Don't Lie", "Wyclef Jean", 2006),
-    ("pRpeEdMmmQ0", 50, "Shakira", "Waka Waka (This Time for Africa)", "Freshlyground", 2010),
-    ("F57P9C4SAW4", 48, "Katy Perry", "California Gurls", "Snoop Dogg", 2010),
-    ("O-zpOMYRi0w", 52, "Iggy Azalea", "Fancy", "Charli XCX", 2014),
-    ("kJQP7kiw5Fk", 56, "Luis Fonsi", "Despacito", "Daddy Yankee", 2017),
-    ("Io0fBr1XBUA", 50, "The Chainsmokers", "Don't Let Me Down", "Daya", 2016),
-    ("hHUbLv4ThOo", 40, "Pitbull", "Timber", "Kesha", 2013),
+    # ── Rock / metal
+    ("-tJYN-eG1zk", 22, "Queen", "We Will Rock You", [], "Rock", "Anglais", 1977),
+    ("a01QQZyl-_I", 55, "Queen", "Under Pressure", ["David Bowie"], "Rock", "Anglais", 1981),
+    ("pAgnJDJN4VA", 38, "AC/DC", "Back in Black", [], "Hard rock", "Anglais", 1980),
+    ("1w7OgIMMRc4", 55, "Guns N' Roses", "Sweet Child o' Mine", [], "Hard rock", "Anglais", 1987),
+    ("btPJPFnesV4", 55, "Survivor", "Eye of the Tiger", [], "Rock", "Anglais", 1982),
+    ("lDK9QqIzhwk", 62, "Bon Jovi", "Livin' on a Prayer", [], "Rock", "Anglais", 1986),
+    ("OMOGaugKpzs", 10, "The Police", "Every Breath You Take", [], "Pop rock", "Anglais", 1983),
+    ("hTWKbfoikeg", 48, "Nirvana", "Smells Like Teen Spirit", [], "Grunge", "Anglais", 1991),
+    ("bx1Bh8ZvH84", 56, "Oasis", "Wonderwall", [], "Britpop", "Anglais", 1995),
+    ("W3q8Od5qJio", 52, "Rammstein", "Du Hast", [], "Metal", "Allemand", 1997),
+    ("0J2QdDbelmY", 2, "The White Stripes", "Seven Nation Army", [], "Rock", "Anglais", 2003),
+    ("dvgZkm1xWPE", 40, "Coldplay", "Viva la Vida", [], "Pop rock", "Anglais", 2008),
+    ("w8KQmps-Sog", 50, "Muse", "Uprising", [], "Rock", "Anglais", 2009),
+    ("9mL6Cmkg2_A", 35, "Måneskin", "Zitti e buoni", [], "Rock", "Italien", 2021),
+    # ── Pop / disco / funk / soul
+    ("xFrGuyw1V8s", 50, "ABBA", "Dancing Queen", [], "Disco", "Anglais", 1976),
+    ("fNFzfwLM72c", 45, "Bee Gees", "Stayin' Alive", [], "Disco", "Anglais", 1977),
+    ("Gs069dndIYk", 15, "Earth, Wind & Fire", "September", [], "Funk", "Anglais", 1978),
+    ("Zi_XLOBDo_Y", 60, "Michael Jackson", "Billie Jean", [], "Pop", "Anglais", 1982),
+    ("djV11Xbc914", 40, "a-ha", "Take On Me", [], "Synthpop", "Anglais", 1985),
+    ("eH3giaIzONA", 48, "Whitney Houston", "I Wanna Dance with Somebody", [], "Pop", "Anglais", 1987),
+    ("gJLIiF15wjQ", 40, "Spice Girls", "Wannabe", [], "Pop", "Anglais", 1996),
+    ("C-u5WLJ9Yk4", 45, "Britney Spears", "...Baby One More Time", [], "Pop", "Anglais", 1998),
+    ("KUmZp8pR1uc", 5, "Amy Winehouse", "Rehab", [], "Soul", "Anglais", 2006),
+    ("qrO4YZeyl0I", 30, "Lady Gaga", "Bad Romance", [], "Pop", "Anglais", 2009),
+    ("rYEDA3JcQqw", 45, "Adele", "Rolling in the Deep", [], "Soul pop", "Anglais", 2010),
+    ("ZbZSe6N_BXs", 35, "Pharrell Williams", "Happy", [], "Soul", "Anglais", 2013),
+    ("JGwWNGJdvx8", 52, "Ed Sheeran", "Shape of You", [], "Pop", "Anglais", 2017),
+    ("4NRXx6U8ABQ", 42, "The Weeknd", "Blinding Lights", [], "Synthpop", "Anglais", 2019),
+    ("DyDfgMOUjCI", 30, "Billie Eilish", "bad guy", [], "Pop", "Anglais", 2019),
+    ("H5v3kku4y6Q", 30, "Harry Styles", "As It Was", [], "Pop", "Anglais", 2022),
+    ("22lISUXgSUw", 45, "Mahmood", "Soldi", [], "Pop urbaine", "Italien", 2019),
+    # ── Rap / R&B
+    ("fPO76Jlnz6c", 2, "Coolio", "Gangsta's Paradise", ["L.V."], "Rap", "Anglais", 1995),
+    ("_CL6n0FJZpk", 5, "Dr. Dre", "Still D.R.E.", ["Snoop Dogg"], "Rap", "Anglais", 1999),
+    ("gOMhN-hfMtY", 4, "Eminem", "Stan", ["Dido"], "Rap", "Anglais", 2000),
+    ("Urdlvw0SSEc", 40, "Alicia Keys", "Fallin'", [], "R&B", "Anglais", 2001),
+    ("_Yhyp-_hX2s", 82, "Eminem", "Lose Yourself", [], "Rap", "Anglais", 2002),
+    ("YVkUvmDQ3HY", 38, "Eminem", "Without Me", [], "Rap", "Anglais", 2002),
+    ("5qm8PH4xAss", 25, "50 Cent", "In Da Club", [], "Rap", "Anglais", 2003),
+    ("ViwtNLUqkMY", 28, "Beyoncé", "Crazy in Love", ["JAY-Z"], "R&B", "Anglais", 2003),
+    ("6vwNcNOTVzY", 35, "Kanye West", "Gold Digger", ["Jamie Foxx"], "Rap", "Anglais", 2005),
+    ("CvBfHwUxHIk", 28, "Rihanna", "Umbrella", ["JAY-Z"], "R&B", "Anglais", 2007),
+    ("vk6014HuxcE", 58, "JAY-Z", "Empire State of Mind", ["Alicia Keys"], "Rap", "Anglais", 2009),
+    ("uelHwf8o7_U", 20, "Eminem", "Love the Way You Lie", ["Rihanna"], "Rap", "Anglais", 2010),
+    ("kffacxfA7G4", 12, "Justin Bieber", "Baby", ["Ludacris"], "Pop", "Anglais", 2010),
+    ("QK8mJJJvaes", 26, "Macklemore & Ryan Lewis", "Thrift Shop", ["Wanz"], "Rap", "Anglais", 2012),
+    ("OPf0YbXqDm0", 55, "Mark Ronson", "Uptown Funk", ["Bruno Mars"], "Funk", "Anglais", 2014),
+    ("RgKAFK5djSk", 8, "Wiz Khalifa", "See You Again", ["Charlie Puth"], "Hip-hop", "Anglais", 2015),
+    ("tvTRZJ-4EyI", 48, "Kendrick Lamar", "HUMBLE.", [], "Rap", "Anglais", 2017),
+    # ── Électro / dance
+    ("68ugkg9tZH4", 25, "Eiffel 65", "Blue (Da Ba Dee)", [], "Eurodance", "Anglais", 1999),
+    ("FGBhQbmPwH8", 25, "Daft Punk", "One More Time", [], "Électro", "Anglais", 2000),
+    ("_ovdm2yX4MA", 15, "Avicii", "Levels", [], "Électro", "Anglais", 2011),
+    ("JRfuAukYTKg", 44, "David Guetta", "Titanium", ["Sia"], "Électro", "Anglais", 2011),
+    ("tg00YEETFzg", 45, "Rihanna", "We Found Love", ["Calvin Harris"], "Dance-pop", "Anglais", 2011),
+    ("h5EofwRzit0", 50, "Daft Punk", "Get Lucky", ["Pharrell Williams", "Nile Rodgers"], "Disco", "Anglais", 2013),
+    ("IcrbM1l_BoI", 60, "Avicii", "Wake Me Up", ["Aloe Blacc"], "Électro", "Anglais", 2013),
+    ("YqeW9_5kURI", 45, "Major Lazer", "Lean On", ["DJ Snake", "MØ"], "Électro", "Anglais", 2015),
+    ("PT2_F-1esPk", 44, "The Chainsmokers", "Closer", ["Halsey"], "Électro", "Anglais", 2016),
+    # ── Latino
+    ("Lbfe3-v7yE0", 20, "Los del Río", "Macarena", [], "Dance", "Espagnol", 1993),
+    ("p47fEXGabaY", 40, "Ricky Martin", "Livin' la Vida Loca", [], "Pop latino", "Anglais", 1999),
+    ("CCF1_jI8Prk", 25, "Daddy Yankee", "Gasolina", [], "Reggaeton", "Espagnol", 2004),
+    ("DUT5rEU6pqM", 36, "Shakira", "Hips Don't Lie", ["Wyclef Jean"], "Pop latino", "Anglais", 2006),
+    ("pRpeEdMmmQ0", 50, "Shakira", "Waka Waka (This Time for Africa)", ["Freshlyground"], "Pop", "Anglais", 2010),
+    ("NUsoVlDFqZg", 40, "Enrique Iglesias", "Bailando", ["Descemer Bueno", "Gente de Zona"], "Pop latino", "Espagnol", 2014),
+    ("6Mgqbai3fKo", 50, "Shakira", "Chantaje", ["Maluma"], "Pop latino", "Espagnol", 2016),
+    ("kJQP7kiw5Fk", 56, "Luis Fonsi", "Despacito", ["Daddy Yankee"], "Reggaeton", "Espagnol", 2017),
+    ("wnJ6LuUFpMo", 45, "J Balvin", "Mi Gente", ["Willy William"], "Reggaeton", "Espagnol", 2017),
+    ("HCjNJDNzw8Y", 45, "Camila Cabello", "Havana", ["Young Thug"], "Pop latino", "Anglais", 2017),
+    # ── Chanson / pop française
+    ("6Dh-RL__uN4", 36, "Zaz", "Je veux", [], "Jazz manouche", "Français", 2010),
+    ("VHoT4N43jK8", 45, "Stromae", "Alors on danse", [], "Électro", "Français", 2009),
+    ("oiKj0Z_Xnjc", 50, "Stromae", "Papaoutai", [], "Électro-pop", "Français", 2013),
+    ("K5KAc5CoCuk", 48, "Indila", "Dernière danse", [], "Pop", "Français", 2013),
 ]
+
+BT_MIN_ALL = 5  # tout trouvé = 5 points (ou davantage s'il y a plus de 5 points possibles)
 
 
 def bt_song(t):
-    return {"id": t[0], "start": t[1], "artist": t[2], "title": t[3], "feat": t[4], "year": t[5]}
+    return {"id": t[0], "start": t[1], "artist": t[2], "title": t[3], "feats": list(t[4]),
+            "genre": t[5], "lang": t[6], "year": t[7]}
 
 
 def blind_pool(s):
     pool = [bt_song(t) for t in BLIND_SONGS] if s["builtin"] else []
     return pool + list(s["custom"])
+
+
+def blind_pick(pool, n):
+    """Tire n morceaux en variant au maximum genre / langue / décennie d'un titre à l'autre
+    (et en faisant apparaître les langues, genres et décennies encore absents)."""
+    pool = list(pool)
+    random.shuffle(pool)
+    out = []
+    while pool and len(out) < n:
+        if not out:
+            out.append(pool.pop())
+            continue
+        prev = out[-1]
+        dec = lambda s_: (s_.get("year") or 0) // 10
+        seen_l = {x.get("lang") for x in out}
+        seen_g = {x.get("genre") for x in out}
+        seen_d = {dec(x) for x in out}
+
+        def score(c):
+            diff = (c.get("genre") != prev.get("genre")) + (c.get("lang") != prev.get("lang")) + (dec(c) != dec(prev))
+            new = (c.get("lang") not in seen_l) + (c.get("genre") not in seen_g) + (dec(c) not in seen_d)
+            return diff * 2 + new
+
+        best = max(score(c) for c in pool)
+        pick = random.choice([c for c in pool if score(c) == best])
+        pool.remove(pick)
+        out.append(pick)
+    return out
 
 
 def parse_yt_id(t):
@@ -1061,7 +1144,7 @@ def parse_time(t):
     return int(m.group(1)) * 60 + int(m.group(2)) if m else None
 
 
-# ── correction automatique (tolérante) ; les joueurs peuvent ensuite la contester
+# ── correction automatique (tolérante) ; les joueurs peuvent ensuite l'inverser point par point
 def _sq(t):
     t = (t or "").lower()
     for a, b in (("ø", "o"), ("æ", "ae"), ("œ", "oe"), ("ß", "ss"), ("&", " and ")):
@@ -1074,16 +1157,8 @@ def _sq(t):
 
 
 def _names(text):
-    return [n.strip() for n in re.split(r"\s*(?:,|&|/|\band\b|\bet\b|\bfeat\.?|\bft\.?)\s*", text or "", flags=re.I) if n.strip()]
-
-
-def bt_variants(song, key):
-    if key == "artist":
-        return [song["artist"]] + _names(song["artist"])
-    if key == "feat":
-        return [song["feat"]] + _names(song["feat"])
-    t = song["title"]
-    return [t, re.sub(r"\(.*?\)", "", t)] + re.findall(r"\((.*?)\)", t)
+    return [n.strip() for n in re.split(r"\s*(?:,|;|&|/|\band\b|\bet\b|\bfeat\.?|\bft\.?|\bavec\b)\s*", text or "", flags=re.I)
+            if n.strip()]
 
 
 def bt_match(ans, variants):
@@ -1104,32 +1179,39 @@ def bt_match(ans, variants):
     return False
 
 
-def bt_auto(song, key, ans):
-    if key == "year":
-        m = re.search(r"\d{4}", ans or "")
-        return bool(m) and int(m.group()) == int(song["year"])
-    if key == "feat" and not (song["feat"] or "").strip():
-        a = _sq(ans)
-        return a == "" or a.startswith(("aucun", "non", "pas", "rien", "sans", "no", "none"))
-    return bt_match(ans, bt_variants(song, key))
+def bt_items(song):
+    """Les points à gagner : artiste principal, titre, et 1 point par featuring."""
+    items = [("artist", "Artiste", song["artist"]), ("title", "Titre", song["title"])]
+    n = len(song["feats"])
+    for i, name in enumerate(song["feats"]):
+        items.append((f"feat{i}", "Featuring" if n == 1 else f"Featuring {i + 1}", name))
+    return items
 
 
-def bt_truth(song, key):
-    v = song[key]
-    return str(v) if str(v).strip() else "— (aucun)"
+def bt_auto_all(song, ans):
+    t = song["title"]
+    out = {
+        "artist": bt_match(ans.get("artist", ""), [song["artist"]] + _names(song["artist"])),
+        "title": bt_match(ans.get("title", ""), [t, re.sub(r"\(.*?\)", "", t)] + re.findall(r"\((.*?)\)", t)),
+    }
+    fa = ans.get("feat", "")
+    cands = (_names(fa) + [fa]) if fa.strip() else []
+    for i, name in enumerate(song["feats"]):
+        out[f"feat{i}"] = any(bt_match(c, [name]) for c in cands)
+    return out
 
 
 def bt_score(b):
-    """ok = décision finale (correction auto, inversée si l'adversaire a contesté/accepté)."""
+    """ok = décision finale = correction auto, inversée si l'adversaire l'a contestée / accordée."""
     song = b["song"]
-    ok, auto, pts = [{}, {}], [{}, {}], [0, 0]
+    keys = [k for k, _, _ in bt_items(song)]
+    ok, auto, pts, cnt = [{}, {}], [{}, {}], [0, 0], [0, 0]
     for p in (0, 1):
-        for key, _ in BT_CATS:
-            auto[p][key] = bt_auto(song, key, b["answers"][p].get(key, ""))
-            ok[p][key] = auto[p][key] != (key in b["flips"][1 - p])
-        n = sum(ok[p].values())
-        pts[p] = 5 if n == len(BT_CATS) else n  # bonus : 5 points au lieu de 4
-    return {"ok": ok, "auto": auto, "pts": pts}
+        auto[p] = bt_auto_all(song, b["answers"][p])
+        ok[p] = {k: auto[p][k] != (k in b["flips"][1 - p]) for k in keys}
+        cnt[p] = sum(ok[p].values())
+        pts[p] = max(BT_MIN_ALL, len(keys)) if cnt[p] == len(keys) else cnt[p]
+    return {"keys": keys, "ok": ok, "auto": auto, "pts": pts, "n": cnt}
 
 
 def blind_new_round(room):
@@ -1143,6 +1225,7 @@ def blind_new_round(room):
     b["ready"] = [False, False]
     b["phase"] = "guess"  # guess | review | finished
     b["guess_at"] = time.time()
+    b["stop_at"] = None  # mode sans limite : moment où le 1er joueur a validé
 
 
 def blind_advance(room):
@@ -1185,8 +1268,16 @@ def blind_finalize_if_due(code):
         room = ROOMS.get(code)
         if not room or room["status"] != "playing" or room["game"] != "Blind Test" or not room["blind"]:
             return
-        b = room["blind"]
-        if b["phase"] == "guess" and time.time() - b["guess_at"] > room["blind_settings"]["seconds"] + 14:
+        b, s = room["blind"], room["blind_settings"]
+        if b["phase"] != "guess":
+            return
+        now = time.time()
+        if s["unlimited"]:
+            due = b["stop_at"] is not None and now - b["stop_at"] > 5
+        else:
+            total = s["seconds"] + (s["extra_seconds"] if s["extra"] else 0)
+            due = now - b["guess_at"] > total + 14
+        if due:
             b["submitted"] = [True, True]
             b["phase"] = "review"
             touch(room)
@@ -1218,11 +1309,11 @@ svg{display:block;margin:4px auto 0}
 <div id="msg">Prépare-toi…</div>
 <button id="snd">Pas de son ? Touche ici</button>
 <script>
-var D=__DUR__, S=__START__, LEAD=__LEAD__, VID="__ID__";
+var D=__DUR__, X=__EXTRA__, FREE=__FREE__, S=__START__, LEAD=__LEAD__, VID="__ID__";
 try{document.body.style.color=getComputedStyle(window.parent.document.body).color;}catch(e){}
 var C=2*Math.PI*74;
 var ring=document.getElementById('ring'),num=document.getElementById('num'),msg=document.getElementById('msg'),snd=document.getElementById('snd');
-var player=null,ready=false,started=false,finished=false,t0=performance.now(),tStart=0,timer=null;
+var player=null,ready=false,stage='lead',t0=performance.now(),tListen=0,tAnswer=0,timer=null;
 function setRing(f,color){var L=Math.max(0,Math.min(1,f))*C;ring.setAttribute('stroke-dasharray',L+' '+C);ring.setAttribute('stroke-dashoffset',-(C-L));ring.setAttribute('stroke',color);}
 function press(){
   var tries=0;
@@ -1235,33 +1326,46 @@ function press(){
     if(tries++<12)setTimeout(go,250);
   })();
 }
-function begin(){
-  started=true;tStart=performance.now();snd.style.display='inline-block';
+function startListen(){
+  stage='listen';tListen=performance.now();snd.style.display='inline-block';
   if(player&&ready){try{player.seekTo(S,true);player.playVideo();}catch(e){}}
 }
-function finish(){
-  finished=true;if(timer)clearInterval(timer);
-  setRing(0,'#ef4444');num.textContent='0';msg.textContent='Temps écoulé !';
+function endListen(){
   try{if(player)player.pauseVideo();}catch(e){}
+  snd.style.display='none';
+  if(X>0){stage='answer';tAnswer=performance.now();}else{finish();}
+}
+function finish(){
+  stage='done';if(timer)clearInterval(timer);
+  setRing(0,'#ef4444');num.textContent='0';msg.textContent='Temps écoulé !';
   press();
 }
 function tick(){
-  if(finished)return;
+  if(stage==='done')return;
   var now=performance.now();
-  if(!started){
+  if(stage==='lead'){
     var rem=LEAD-(now-t0)/1000;
     if(rem>0){num.textContent=Math.ceil(rem);setRing(1,'#f59e0b');msg.textContent='Prépare-toi…';}
-    else if(ready||(now-t0)>(LEAD+5)*1000){begin();}
+    else if(ready||(now-t0)>(LEAD+5)*1000){startListen();}
     else{num.textContent='…';msg.textContent='Chargement du son…';}
   }
-  if(started&&!finished){
-    var r=D-(now-tStart)/1000;
-    if(r<=0){finish();return;}
-    num.textContent=Math.ceil(r);setRing(r/D,r<=3?'#ef4444':'#4f8cff');msg.textContent='Écoute bien !';
+  if(stage==='listen'){
+    var el=(now-tListen)/1000;
+    if(FREE){num.textContent=Math.floor(el);setRing(1,'#4f8cff');msg.textContent='Écoute… valide dès que tu as trouvé';}
+    else{
+      var r=D-el;
+      if(r<=0){endListen();}
+      else{num.textContent=Math.ceil(r);setRing(r/D,(r<=3&&X===0)?'#ef4444':'#4f8cff');msg.textContent='Écoute bien !';}
+    }
+  }
+  if(stage==='answer'){
+    var r2=X-(now-tAnswer)/1000;
+    if(r2<=0){finish();return;}
+    num.textContent=Math.ceil(r2);setRing(r2/X,r2<=3?'#ef4444':'#10b981');msg.textContent='À toi de répondre !';
   }
   requestAnimationFrame(tick);
 }
-snd.onclick=function(){try{if(player){player.unMute();player.setVolume(100);player.seekTo(S+Math.max(0,(performance.now()-tStart)/1000),true);player.playVideo();}}catch(e){}};
+snd.onclick=function(){try{if(player){player.unMute();player.setVolume(100);player.seekTo(S+Math.max(0,(performance.now()-tListen)/1000),true);player.playVideo();}}catch(e){}};
 window.onYouTubeIframeAPIReady=function(){
   var pv={autoplay:0,controls:0,playsinline:1,rel:0,modestbranding:1,disablekb:1,fs:0,iv_load_policy:3,start:S};
   if(location.origin&&location.origin!=='null')pv.origin=location.origin;
@@ -1272,14 +1376,19 @@ timer=setInterval(tick,250);
 requestAnimationFrame(tick);
 </script></body></html>"""
 
+BT_AUTO_JS = AUTO_STOP_JS.replace("Terminé", "Valider mes")
+
 
 def _yt_id(song):
     return re.sub(r"[^A-Za-z0-9_-]", "", str(song["id"]))
 
 
-def bt_guess_html(song, seconds):
+def bt_guess_html(song, s):
+    free = bool(s["unlimited"])
     return (BT_GUESS_HTML.replace("__ID__", _yt_id(song)).replace("__START__", str(int(song["start"])))
-            .replace("__DUR__", str(int(seconds))).replace("__LEAD__", "3"))
+            .replace("__DUR__", str(0 if free else int(s["seconds"])))
+            .replace("__EXTRA__", str(0 if free or not s["extra"] else int(s["extra_seconds"])))
+            .replace("__FREE__", "1" if free else "0").replace("__LEAD__", "3"))
 
 
 def bt_reveal_html(song):
@@ -1294,31 +1403,34 @@ def bt_reveal_html(song):
 def bt_table(b, res, me, opp, names):
     song = b["song"]
 
+    def ans_of(p, key):
+        a = b["answers"][p]
+        if key in ("artist", "title"):
+            return a.get(key, "")
+        return a.get("feat", "") if key == "feat0" else None  # None → « ↳ » (même réponse que la ligne du dessus)
+
     def cell(p, key):
-        ans = b["answers"][p].get(key, "")
-        a = html.escape(ans) if ans.strip() else "—"
+        t = ans_of(p, key)
+        shown = "↳" if t is None else (html.escape(t) if t.strip() else "—")
         ok, auto = res["ok"][p][key], res["auto"][p][key]
         note = ""
         if ok != auto:
-            note = " <i>(accepté)</i>" if ok else " <i>(contesté)</i>"
-        return f"{'✅' if ok else '❌'} {a}{note} <b>+{1 if ok else 0}</b>"
+            note = " <i>(accordé)</i>" if ok else " <i>(contesté)</i>"
+        return f"{'✅' if ok else '❌'} {shown}{note} <b>+{1 if ok else 0}</b>"
 
     out = [
         "<table style='width:100%;border-collapse:collapse;font-size:15px'>",
         f"<tr style='text-align:left;opacity:.7'><th style='padding:6px 4px'></th><th>Réponse</th><th>Toi</th>"
         f"<th>{html.escape(names[opp])}</th></tr>",
     ]
-    for key, label in BT_CATS:
-        out.append(
-            f"<tr style='border-top:1px solid rgba(128,128,128,.3)'>"
-            f"<td style='padding:6px 4px;font-weight:600'>{label}</td>"
-            f"<td><b>{html.escape(bt_truth(song, key))}</b></td><td>{cell(me, key)}</td><td>{cell(opp, key)}</td></tr>"
-        )
-    bonus = lambda p: "<b>+1</b>" if res["pts"][p] == 5 else "—"
-    out.append(
-        f"<tr style='border-top:1px solid rgba(128,128,128,.3)'><td style='padding:6px 4px;font-weight:600'>Bonus 4/4</td>"
-        f"<td></td><td>{bonus(me)}</td><td>{bonus(opp)}</td></tr>"
-    )
+    row = "<tr style='border-top:1px solid rgba(128,128,128,.3)'><td style='padding:6px 4px;font-weight:600'>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>"
+    for key, label, truth in bt_items(song):
+        out.append(row.format(label, f"<b>{html.escape(truth)}</b>", cell(me, key), cell(opp, key)))
+    if not song["feats"]:
+        fa = lambda p: html.escape(b["answers"][p].get("feat", "")) or "—"
+        out.append(row.format("Featuring", "<b>— (aucun)</b>", fa(me), fa(opp)))
+    bonus = lambda p: f"<b>+{res['pts'][p] - res['n'][p]}</b>" if res["pts"][p] > res["n"][p] else "—"
+    out.append(row.format(f"Bonus (tout trouvé = {max(BT_MIN_ALL, len(res['keys']))} pts)", "", bonus(me), bonus(opp)))
     out.append("</table>")
     return "".join(out)
 
@@ -1327,31 +1439,50 @@ def blind_settings_ui(room, host):
     s = room["blind_settings"]
     if not host:
         n = len(blind_pool(s))
-        st.markdown(
-            f"**Manches :** {min(s['rounds'], max(n, 1))}  \n**Durée de l'extrait :** {s['seconds']} s  \n"
-            f"**Morceaux disponibles :** {n}"
-        )
+        if s["unlimited"]:
+            temps = "sans limite (la manche s'arrête dès qu'un joueur valide)"
+        else:
+            temps = f"extrait de {s['seconds']} s" + (f" + {s['extra_seconds']} s pour répondre" if s["extra"] else "")
+        st.markdown(f"**Manches :** {min(s['rounds'], max(n, 1))}  \n**Temps :** {temps}  \n**Morceaux disponibles :** {n}")
         return
-    secs = st.slider("Durée de l'extrait (secondes)", 5, 30, s["seconds"], key="bt_secs")
+
+    unlimited = st.checkbox("Sans limite de temps (la manche s'arrête dès qu'un joueur valide)",
+                            value=s["unlimited"], key="bt_unl")
+    secs, extra, extra_s = s["seconds"], s["extra"], s["extra_seconds"]
+    if unlimited:
+        st.caption("Pas de chronomètre : l'extrait joue jusqu'à ce que l'un de vous valide, puis les réponses s'affichent pour les deux.")
+    else:
+        secs = st.slider("Durée de l'extrait (secondes)", 20, 60, min(60, max(20, s["seconds"])), key="bt_secs")
+        extra = st.checkbox("Temps de réponse après l'extrait", value=s["extra"], key="bt_extra",
+                            help="Une fois l'extrait terminé, un second compte à rebours te laisse le temps de répondre.")
+        if extra:
+            extra_s = st.slider("Temps de réponse après l'extrait (secondes)", 5, 30,
+                                min(30, max(5, s["extra_seconds"])), key="bt_extra_s")
+
     builtin = st.checkbox("Utiliser la playlist intégrée", value=s["builtin"], key="bt_builtin")
 
     with st.expander("Ajouter mes propres morceaux (lien YouTube)"):
         with st.form("bt_add", clear_on_submit=True):
             url = st.text_input("Lien YouTube")
             start_t = st.text_input("Début de l'extrait / du refrain (secondes ou mm:ss)", placeholder="1:05")
-            artist = st.text_input("Artiste")
+            artist = st.text_input("Artiste principal")
             title = st.text_input("Titre")
-            feat = st.text_input("Featuring (vide s'il n'y en a pas)")
-            year = st.text_input("Année", max_chars=4)
+            feat = st.text_input("Featuring(s) — séparés par des virgules, vide s'il n'y en a pas")
+            genre = st.text_input("Genre (facultatif)")
+            lang = st.text_input("Langue (facultatif)")
+            year = st.text_input("Année (facultatif)", max_chars=4)
             add = st.form_submit_button("Ajouter ce morceau")
         if add:
             vid, st_s = parse_yt_id(url), parse_time(start_t)
-            if not vid or st_s is None or not artist.strip() or not title.strip() or not re.fullmatch(r"\d{4}", year.strip()):
-                st.error("Vérifie le lien, le début, l'artiste, le titre et l'année (4 chiffres).")
+            if not vid or st_s is None or not artist.strip() or not title.strip() or (year.strip() and not re.fullmatch(r"\d{4}", year.strip())):
+                st.error("Vérifie le lien, le début, l'artiste, le titre (et l'année si tu en mets une).")
             else:
                 with LOCK:
-                    s["custom"].append({"id": vid, "start": st_s, "artist": artist.strip(), "title": title.strip(),
-                                        "feat": feat.strip(), "year": int(year)})
+                    s["custom"].append({
+                        "id": vid, "start": st_s, "artist": artist.strip(), "title": title.strip(),
+                        "feats": [n for n in _names(feat) if n], "genre": genre.strip(), "lang": lang.strip(),
+                        "year": int(year) if year.strip() else 0,
+                    })
                     touch(room)
                 ss.seen_version = room["version"]
                 st.rerun()
@@ -1367,10 +1498,11 @@ def blind_settings_ui(room, host):
         st.caption("1 morceau disponible : 1 manche.")
         rounds = 1
     else:
-        maxr = min(20, pool_n)
+        maxr = min(30, pool_n)
         rounds = st.slider("Nombre de manches", 1, maxr, min(s["rounds"], maxr), key="bt_rounds")
-        st.caption(f"{pool_n} morceaux disponibles.")
-    new = {"rounds": rounds, "seconds": secs, "builtin": builtin, "custom": s["custom"]}
+        st.caption(f"{pool_n} morceaux disponibles — l'ordre varie le genre, la langue et l'époque à chaque titre.")
+    new = {"rounds": rounds, "seconds": secs, "unlimited": unlimited, "extra": extra, "extra_seconds": extra_s,
+           "builtin": builtin, "custom": s["custom"]}
     if new != s:
         with LOCK:
             room["blind_settings"] = new
@@ -1383,6 +1515,7 @@ def blind_screen(room):
     me, opp = ss.seat, 1 - ss.seat
     names = room["players"]
     host = me == 0
+    free = s["unlimited"]
 
     st.subheader(f"Blind Test — manche {b['round']}/{b['total']}")
     st.markdown(
@@ -1391,70 +1524,80 @@ def blind_screen(room):
 
     if b["phase"] == "guess":
         # ⚠️ ce composant doit rester le 1er élément variable (contenu constant pendant la manche)
-        components.html(bt_guess_html(b["song"], s["seconds"]), height=250)
+        components.html(bt_guess_html(b["song"], s), height=250)
         if b["submitted"][me]:
             st.success(f"Réponses envoyées. En attente de {names[opp]}…")
         else:
-            if b["submitted"][opp]:
+            if free and b["stop_at"] is not None:
+                st.warning(f"⏱️ {esc(names[opp])} a validé : la manche s'arrête, envoi de tes réponses…")
+            elif b["submitted"][opp]:
                 st.info(f"{esc(names[opp])} a déjà validé.")
             with st.form(f"bt_form_{b['id']}_{b['rid']}"):
-                vals = {}
-                for key, label in BT_CATS:
-                    vals[key] = st.text_input(
-                        label, key=f"bt_{b['id']}_{b['rid']}_{key}",
-                        max_chars=4 if key == "year" else None,
-                        placeholder="ex : 2014" if key == "year" else None,
-                    )
+                vals = {
+                    "artist": st.text_input("Artiste (principal)", key=f"bt_{b['id']}_{b['rid']}_artist"),
+                    "title": st.text_input("Titre", key=f"bt_{b['id']}_{b['rid']}_title"),
+                    "feat": st.text_input("Featuring(s) — sépare-les par des virgules", key=f"bt_{b['id']}_{b['rid']}_feat"),
+                }
                 go = st.form_submit_button("Valider mes réponses", type="primary", use_container_width=True)
             if go:
                 with LOCK:
                     b["answers"][me] = dict(vals)
                     b["submitted"][me] = True
+                    if free and b["stop_at"] is None:
+                        b["stop_at"] = time.time()
                     if all(b["submitted"]):
                         b["phase"] = "review"
                     touch(room)
                 st.rerun()
-        st.caption("1 point par catégorie, 5 points si tu trouves les 4. Les réponses sont validées automatiquement à la fin du temps.")
+            elif free and b["stop_at"] is not None:
+                components.html(BT_AUTO_JS, height=0)  # envoie automatiquement ce qui est déjà tapé
+        st.caption(
+            "1 point pour l'artiste, 1 pour le titre, 1 par featuring. Tout trouvé = 5 points. "
+            + ("La manche s'arrête dès qu'un joueur valide." if free else "Tes réponses sont envoyées à la fin du temps.")
+        )
 
     elif b["phase"] == "review":
         song = b["song"]
         components.html(bt_reveal_html(song), height=300)
+        tags = " · ".join(x for x in (song.get("genre"), song.get("lang"), str(song["year"]) if song.get("year") else "") if x)
         st.markdown(
-            f"[Ouvrir la vidéo sur YouTube](https://www.youtube.com/watch?v={_yt_id(song)}&t={int(song['start'])})"
+            (f"*{esc(tags)}*  \n" if tags else "")
+            + f"[Ouvrir la vidéo sur YouTube](https://www.youtube.com/watch?v={_yt_id(song)}&t={int(song['start'])})"
             f" · [Rechercher le titre](https://www.youtube.com/results?search_query="
             f"{urllib.parse.quote_plus(song['artist'] + ' ' + song['title'])})"
         )
         res = bt_score(b)
-        flips_on_me = [lbl for key, lbl in BT_CATS if key in b["flips"][opp] and b["answers"][me].get(key, "").strip()]
-        if flips_on_me:
-            st.warning(f"⚖️ {esc(names[opp])} a modifié la correction de : {esc(', '.join(flips_on_me))}")
+        labels = {k: lbl for k, lbl, _ in bt_items(song)}
+        changed = [labels[k] for k in res["keys"] if k in b["flips"][opp]]
+        if changed:
+            st.warning(f"⚖️ {esc(names[opp])} a modifié la correction de : {esc(', '.join(changed))}")
         st.markdown(bt_table(b, res, me, opp, names), unsafe_allow_html=True)
         st.markdown(f"**Points de la manche :** toi {res['pts'][me]} · {esc(names[opp])} {res['pts'][opp]}")
 
-        opp_rows = [(k, lbl, b["answers"][opp].get(k, "")) for k, lbl in BT_CATS if b["answers"][opp].get(k, "").strip()]
-        if opp_rows:
-            with st.expander(f"⚖️ Contester les réponses de {names[opp]}"):
-                st.caption("Coche une réponse pour inverser la décision : retirer un point accordé, ou en donner un refusé. "
-                           "Puis confirme.")
-                keys = []
-                for k, lbl, a in opp_rows:
-                    key = f"bf_{b['rid']}_{k}"
-                    if key not in ss:
-                        ss[key] = k in b["flips"][me]
-                    action = "contester (retirer le point)" if res["auto"][opp][k] else "accepter quand même (donner le point)"
-                    st.checkbox(f"{lbl} — « {esc(a)} » : {action}", key=key)
-                    keys.append(k)
-                st.button(
-                    "✅ Confirmer la contestation",
-                    key=f"bt_conf_{b['rid']}",
-                    type="primary",
-                    on_click=blind_confirm_flips,
-                    args=(room["code"], me, keys, b["rid"]),
-                    use_container_width=True,
-                )
-                n_c = len(b["flips"][me])
-                if n_c:
-                    st.caption(f"Décision enregistrée sur {n_c} réponse{'s' if n_c > 1 else ''}.")
+        with st.expander(f"⚖️ Accorder ou contester des points à {names[opp]}"):
+            st.caption("Une faute de frappe ? Une réponse acceptée à tort ? Coche un point pour inverser la décision "
+                       "(donner un point refusé, ou retirer un point accordé), puis confirme.")
+            keys = []
+            for key, label, truth in bt_items(song):
+                a = b["answers"][opp]
+                txt = a.get(key, "") if key in ("artist", "title") else a.get("feat", "")
+                state = "✅ accordé → contester" if res["auto"][opp][key] else "❌ refusé → accorder"
+                fkey = f"bf_{b['rid']}_{key}"
+                if fkey not in ss:
+                    ss[fkey] = key in b["flips"][me]
+                st.checkbox(f"{label} ({esc(truth)}) — « {esc(txt) or '…'} » : {state}", key=fkey)
+                keys.append(key)
+            st.button(
+                "✅ Confirmer",
+                key=f"bt_conf_{b['rid']}",
+                type="primary",
+                on_click=blind_confirm_flips,
+                args=(room["code"], me, keys, b["rid"]),
+                use_container_width=True,
+            )
+            n_c = len(b["flips"][me])
+            if n_c:
+                st.caption(f"Décision enregistrée sur {n_c} point{'s' if n_c > 1 else ''}.")
 
         last = b["round"] >= b["total"]
         if b["ready"][me]:
@@ -1480,14 +1623,10 @@ def blind_screen(room):
             )
         if host:
             c1, c2 = st.columns(2)
-            c1.button("🔁 Rejouer", on_click=start_game, args=(code_of(room),), type="primary", use_container_width=True)
-            c2.button("🏠 Menu principal", on_click=back_to_lobby, args=(code_of(room),), use_container_width=True)
+            c1.button("🔁 Rejouer", on_click=start_game, args=(room["code"],), type="primary", use_container_width=True)
+            c2.button("🏠 Menu principal", on_click=back_to_lobby, args=(room["code"],), use_container_width=True)
         else:
             st.caption("L'hôte peut relancer une partie ou revenir au menu.")
-
-
-def code_of(room):
-    return room["code"]
 
 
 # ════════════════════════════════════════════════════════════════
